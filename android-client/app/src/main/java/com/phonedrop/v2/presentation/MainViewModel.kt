@@ -6,17 +6,22 @@ import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.phonedrop.v2.data.mirror.DecoderStatus
 import com.phonedrop.v2.data.protocol.InputEventPayload
+import com.phonedrop.v2.data.protocol.RemoteFileEntry
 import com.phonedrop.v2.data.repository.PhoneDropSessionHolder
 import com.phonedrop.v2.domain.model.ConnectionState
+import com.phonedrop.v2.domain.model.LocalReceivedFile
 import com.phonedrop.v2.domain.model.MirrorMode
 import com.phonedrop.v2.domain.model.TransferState
 import com.phonedrop.v2.domain.usecase.ConnectSessionUseCase
 import com.phonedrop.v2.domain.usecase.SendFileUseCase
 import com.phonedrop.v2.domain.usecase.SyncClipboardUseCase
 import com.phonedrop.v2.service.FileTransferService
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -34,6 +39,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val latestClipboard: StateFlow<String> = sessionHolder.latestClipboard
     val mirrorMode: StateFlow<MirrorMode> = sessionHolder.mirrorMode
+    val remoteFiles: StateFlow<List<RemoteFileEntry>> = sessionHolder.remoteFiles
+    val localFiles: StateFlow<List<LocalReceivedFile>> = sessionHolder.localFiles
+    val statusToast: StateFlow<String?> = sessionHolder.statusToast
+
+    private val _decoderStatus = MutableStateFlow<DecoderStatus>(DecoderStatus.Idle)
+    val decoderStatus: StateFlow<DecoderStatus> = _decoderStatus.asStateFlow()
 
     fun startServiceAndConnect(manualHost: String? = null) {
         val ctx = getApplication<Application>()
@@ -54,14 +65,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
-        viewModelScope.launch {
-            sessionHolder.disconnect()
-        }
+        viewModelScope.launch { sessionHolder.disconnect() }
     }
 
-    fun sendFile(uri: Uri) {
+    fun sendFiles(uris: List<Uri>) {
         viewModelScope.launch {
-            runCatching { sendFileUseCase(uri) }
+            for (u in uris) {
+                runCatching { sendFileUseCase(u) }
+            }
         }
     }
 
@@ -77,7 +88,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun requestFileList() {
+        viewModelScope.launch {
+            runCatching { sessionHolder.requestFileList() }
+            sessionHolder.refreshLocalFiles()
+        }
+    }
+
+    fun pullRemoteFile(name: String) {
+        viewModelScope.launch {
+            runCatching { sessionHolder.pullRemoteFile(name) }
+        }
+    }
+
+    fun deleteRemoteFile(name: String) {
+        viewModelScope.launch {
+            runCatching { sessionHolder.deleteRemoteFile(name) }
+        }
+    }
+
+    fun refreshLocalFiles() {
+        viewModelScope.launch { sessionHolder.refreshLocalFiles() }
+    }
+
+    fun deleteLocalFile(uriString: String) {
+        viewModelScope.launch { sessionHolder.deleteLocalFile(uriString) }
+    }
+
+    fun startDesktopViewing() {
+        sessionHolder.setMirrorMode(MirrorMode.RECEIVING_LINUX_DESKTOP)
+        viewModelScope.launch {
+            runCatching { sessionHolder.requestStartDesktopStream() }
+        }
+    }
+
+    fun stopDesktopViewing() {
+        if (sessionHolder.mirrorMode.value == MirrorMode.RECEIVING_LINUX_DESKTOP) {
+            sessionHolder.setMirrorMode(MirrorMode.IDLE)
+        }
+        viewModelScope.launch {
+            runCatching { sessionHolder.requestStopDesktopStream() }
+        }
+    }
+
+    fun launchPhoneScrcpyOnLaptop() {
+        viewModelScope.launch {
+            runCatching { sessionHolder.requestLaunchScrcpy() }
+        }
+    }
+
     fun setMirrorMode(mode: MirrorMode) {
         sessionHolder.setMirrorMode(mode)
+    }
+
+    fun updateDecoderStatus(status: DecoderStatus) {
+        _decoderStatus.value = status
+    }
+
+    fun clearStatusToast() {
+        sessionHolder.clearStatusToast()
     }
 }

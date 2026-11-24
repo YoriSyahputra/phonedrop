@@ -1,7 +1,9 @@
 package com.phonedrop.v2.domain.repository
 
 import android.net.Uri
+import com.phonedrop.v2.data.protocol.RemoteFileEntry
 import com.phonedrop.v2.domain.model.ConnectionState
+import com.phonedrop.v2.domain.model.LocalReceivedFile
 import com.phonedrop.v2.domain.model.MirrorMode
 import com.phonedrop.v2.domain.model.TransferState
 import kotlinx.coroutines.flow.StateFlow
@@ -11,6 +13,8 @@ interface PhoneDropRepository {
     val transfers: StateFlow<Map<String, TransferState>>
     val latestClipboard: StateFlow<String>
     val mirrorMode: StateFlow<MirrorMode>
+    val remoteFiles: StateFlow<List<RemoteFileEntry>>
+    val localFiles: StateFlow<List<LocalReceivedFile>>
 
     suspend fun connectAuto(manualHost: String? = null, port: Int = 28200)
     suspend fun disconnect()

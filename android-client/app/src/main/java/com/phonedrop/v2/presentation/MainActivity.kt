@@ -1,6 +1,9 @@
 package com.phonedrop.v2.presentation
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
@@ -8,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.SurfaceView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,14 +24,17 @@ import com.phonedrop.v2.domain.model.MirrorMode
 import com.phonedrop.v2.presentation.ui.PhoneDropScreen
 import com.phonedrop.v2.service.FileTransferService
 import com.phonedrop.v2.service.ScreenCaptureService
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private var videoDecoder: VideoStreamDecoder? = null
+    private var decoderStatusJob: Job? = null
 
-    private val openFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            viewModel.sendFile(uri)
+    private val openFilesLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            viewModel.sendFiles(uris)
         }
     }
 
@@ -57,7 +64,11 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 PhoneDropScreen(
                     viewModel = viewModel,
-                    onPickFile = { openFileLauncher.launch(arrayOf("*/*")) },
+                    onPickFiles = { openFilesLauncher.launch(arrayOf("*/*")) },
+                    onOpenFile = { uriStr, mime -> openLocalUri(uriStr, mime) },
+                    onShareFile = { uriStr, mime -> shareLocalUri(uriStr, mime) },
+                    onReadPhoneClipboard = { readPhoneClipboard() },
+                    onCopyToPhoneClipboard = { copyToPhoneClipboard(it) },
                     onStartPhoneMirror = { requestScreenCapture() },
                     onStopPhoneMirror = { stopPhoneScreenCapture() },
                     onSurfaceReady = { sv -> attachVideoDecoderSurface(sv) },
@@ -65,6 +76,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshLocalFiles()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -101,6 +117,44 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun openLocalUri(uriStr: String, mimeType: String) {
+        runCatching {
+            val uri = Uri.parse(uriStr)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType.ifBlank { "*/*" })
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "Buka file dengan"))
+        }.onFailure {
+            Toast.makeText(this, "Tidak ada aplikasi untuk membuka file ini", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun shareLocalUri(uriStr: String, mimeType: String) {
+        runCatching {
+            val uri = Uri.parse(uriStr)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType.ifBlank { "*/*" }
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "Bagikan file"))
+        }
+    }
+
+    private fun readPhoneClipboard(): String {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return ""
+        val clip = cm.primaryClip ?: return ""
+        if (clip.itemCount <= 0) return ""
+        return clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
+    }
+
+    private fun copyToPhoneClipboard(text: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        cm.setPrimaryClip(ClipData.newPlainText("PhoneDrop", text))
+        Toast.makeText(this, "Disalin ke clipboard HP", Toast.LENGTH_SHORT).show()
+    }
+
     private fun requestScreenCapture() {
         val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjLauncher.launch(mpm.createScreenCaptureIntent())
@@ -131,12 +185,22 @@ class MainActivity : ComponentActivity() {
     private fun attachVideoDecoderSurface(surfaceView: SurfaceView) {
         detachVideoDecoderSurface()
         val holder = viewModel.sessionHolder
-        videoDecoder = VideoStreamDecoder(holder, holder.scope).also {
-            it.attachSurface(surfaceView.holder.surface)
+        val dec = VideoStreamDecoder(holder, holder.scope)
+        videoDecoder = dec
+        decoderStatusJob = holder.scope.launch {
+            dec.status.collect { st ->
+                viewModel.updateDecoderStatus(st)
+            }
+        }
+        dec.attachSurface(surfaceView.holder.surface)
+        if (viewModel.mirrorMode.value == MirrorMode.RECEIVING_LINUX_DESKTOP) {
+            viewModel.startDesktopViewing()
         }
     }
 
     private fun detachVideoDecoderSurface() {
+        decoderStatusJob?.cancel()
+        decoderStatusJob = null
         videoDecoder?.detach()
         videoDecoder = null
     }

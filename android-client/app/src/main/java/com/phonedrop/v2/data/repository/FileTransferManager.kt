@@ -1,5 +1,6 @@
 package com.phonedrop.v2.data.repository
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -13,6 +14,7 @@ import com.phonedrop.v2.data.protocol.FileDonePayload
 import com.phonedrop.v2.data.protocol.FileInitPayload
 import com.phonedrop.v2.data.protocol.ProtocolConstants
 import com.phonedrop.v2.data.protocol.toHexString
+import com.phonedrop.v2.domain.model.LocalReceivedFile
 import com.phonedrop.v2.domain.model.TransferDirection
 import com.phonedrop.v2.domain.model.TransferState
 import com.phonedrop.v2.domain.model.TransferStatus
@@ -44,7 +46,7 @@ interface TransferOutputSink {
 
 interface OutputHandle {
     val stream: OutputStream
-    fun commit()
+    fun commit(): String?
     fun abort()
 }
 
@@ -56,7 +58,7 @@ class DirectoryTransferSink(private val dir: File) : TransferOutputSink {
         val fos = BufferedOutputStream(FileOutputStream(partFile), ProtocolConstants.CHUNK_SIZE)
         return object : OutputHandle {
             override val stream: OutputStream = fos
-            override fun commit() {
+            override fun commit(): String {
                 fos.flush()
                 fos.close()
                 val target = uniqueFile(dir, safeName)
@@ -64,6 +66,7 @@ class DirectoryTransferSink(private val dir: File) : TransferOutputSink {
                     partFile.copyTo(target, overwrite = true)
                     partFile.delete()
                 }
+                return target.toURI().toString()
             }
 
             override fun abort() {
@@ -118,13 +121,14 @@ class MediaStoreTransferSink(private val context: Context) : TransferOutputSink 
 
         return object : OutputHandle {
             override val stream: OutputStream = buffered
-            override fun commit() {
+            override fun commit(): String {
                 buffered.flush()
                 buffered.close()
                 val doneValues = ContentValues().apply {
                     put(MediaStore.Downloads.IS_PENDING, 0)
                 }
                 resolver.update(uri, doneValues, null, null)
+                return uri.toString()
             }
 
             override fun abort() {
@@ -344,7 +348,7 @@ class FileTransferManager(
             return
         }
 
-        withContext(Dispatchers.IO) { tr.handle.commit() }
+        val savedUri = withContext(Dispatchers.IO) { tr.handle.commit() }
         val okAck = FileDonePayload(done.transferId, tr.bytesWritten, computed, statusCode = 0)
         socketClient.sendFrame(
             ProtocolConstants.PACKET_TYPE_FILE_DONE,
@@ -363,7 +367,8 @@ class FileTransferManager(
                 chunkIndex = tr.chunksWritten,
                 totalChunks = tr.totalChunks,
                 status = TransferStatus.VERIFIED,
-                sha256Hex = computedHex
+                sha256Hex = computedHex,
+                savedUri = savedUri
             )
         )
     }
@@ -530,5 +535,81 @@ class FileTransferManager(
         if (total <= 0L) return 99.9f
         val pct = ((done.toDouble() * 100.0) / total.toDouble()).toFloat()
         return pct.coerceIn(0f, 99.9f)
+    }
+
+    companion object {
+        suspend fun loadLocalReceivedFiles(context: Context): List<LocalReceivedFile> = withContext(Dispatchers.IO) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val out = mutableListOf<LocalReceivedFile>()
+                val projection = arrayOf(
+                    MediaStore.Downloads._ID,
+                    MediaStore.Downloads.DISPLAY_NAME,
+                    MediaStore.Downloads.SIZE,
+                    MediaStore.Downloads.MIME_TYPE,
+                    MediaStore.Downloads.DATE_MODIFIED
+                )
+                val sel = "${MediaStore.Downloads.RELATIVE_PATH} LIKE ? AND ${MediaStore.Downloads.IS_PENDING} = 0"
+                val args = arrayOf("%PhoneDrop%")
+                runCatching {
+                    context.contentResolver.query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        projection,
+                        sel,
+                        args,
+                        "${MediaStore.Downloads.DATE_MODIFIED} DESC"
+                    )?.use { c ->
+                        val idCol = c.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                        val nameCol = c.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)
+                        val sizeCol = c.getColumnIndexOrThrow(MediaStore.Downloads.SIZE)
+                        val mimeCol = c.getColumnIndexOrThrow(MediaStore.Downloads.MIME_TYPE)
+                        val modCol = c.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED)
+                        while (c.moveToNext()) {
+                            val id = c.getLong(idCol)
+                            val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id)
+                            out.add(
+                                LocalReceivedFile(
+                                    uriString = uri.toString(),
+                                    name = c.getString(nameCol) ?: "file",
+                                    sizeBytes = c.getLong(sizeCol),
+                                    mimeType = c.getString(mimeCol) ?: "application/octet-stream",
+                                    modifiedMs = c.getLong(modCol) * 1000L
+                                )
+                            )
+                        }
+                    }
+                }
+                return@withContext out
+            }
+
+            val legacyDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "PhoneDrop"
+            )
+            if (!legacyDir.exists()) return@withContext emptyList()
+            legacyDir.listFiles()
+                ?.filter { it.isFile && !it.name.startsWith(".phonedrop-") && !it.name.endsWith(".part") }
+                ?.sortedByDescending { it.lastModified() }
+                ?.map { f ->
+                    LocalReceivedFile(
+                        uriString = f.toURI().toString(),
+                        name = f.name,
+                        sizeBytes = f.length(),
+                        mimeType = "application/octet-stream",
+                        modifiedMs = f.lastModified()
+                    )
+                } ?: emptyList()
+        }
+
+        suspend fun deleteLocalFile(context: Context, uriString: String): Boolean = withContext(Dispatchers.IO) {
+            runCatching {
+                val uri = Uri.parse(uriString)
+                if (uri.scheme == "content") {
+                    context.contentResolver.delete(uri, null, null) > 0
+                } else {
+                    val path = uri.path ?: return@runCatching false
+                    File(path).delete()
+                }
+            }.getOrDefault(false)
+        }
     }
 }
