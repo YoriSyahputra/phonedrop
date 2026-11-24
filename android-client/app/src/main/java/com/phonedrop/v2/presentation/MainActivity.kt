@@ -15,12 +15,15 @@ import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.core.content.ContextCompat
+import com.phonedrop.v2.data.mirror.VideoStreamDecoder
 import com.phonedrop.v2.domain.model.MirrorMode
 import com.phonedrop.v2.presentation.ui.PhoneDropScreen
 import com.phonedrop.v2.service.FileTransferService
+import com.phonedrop.v2.service.ScreenCaptureService
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
+    private var videoDecoder: VideoStreamDecoder? = null
 
     private val openFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -32,7 +35,6 @@ class MainActivity : ComponentActivity() {
 
     private val mediaProjLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == RESULT_OK && res.data != null) {
-            viewModel.setMirrorMode(MirrorMode.SENDING_PHONE_SCREEN)
             startPhoneScreenCapture(res.resultCode, res.data!!)
         }
     }
@@ -70,6 +72,11 @@ class MainActivity : ComponentActivity() {
         handleShareIntent(intent)
     }
 
+    override fun onDestroy() {
+        detachVideoDecoderSurface()
+        super.onDestroy()
+    }
+
     private fun handleShareIntent(intent: Intent?) {
         if (intent == null) return
         if (Intent.ACTION_SEND == intent.action) {
@@ -99,11 +106,38 @@ class MainActivity : ComponentActivity() {
         mediaProjLauncher.launch(mpm.createScreenCaptureIntent())
     }
 
-    // Wired to ScreenCaptureService & VideoStreamDecoder in Phase 4.
-    protected open fun startPhoneScreenCapture(resultCode: Int, data: Intent) {}
-    protected open fun stopPhoneScreenCapture() {
-        viewModel.setMirrorMode(MirrorMode.IDLE)
+    private fun startPhoneScreenCapture(resultCode: Int, data: Intent) {
+        viewModel.setMirrorMode(MirrorMode.SENDING_PHONE_SCREEN)
+        val intent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_START
+            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
-    protected open fun attachVideoDecoderSurface(surfaceView: SurfaceView) {}
-    protected open fun detachVideoDecoderSurface() {}
+
+    private fun stopPhoneScreenCapture() {
+        viewModel.setMirrorMode(MirrorMode.IDLE)
+        val intent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_STOP
+        }
+        startService(intent)
+    }
+
+    private fun attachVideoDecoderSurface(surfaceView: SurfaceView) {
+        detachVideoDecoderSurface()
+        val holder = viewModel.sessionHolder
+        videoDecoder = VideoStreamDecoder(holder, holder.scope).also {
+            it.attachSurface(surfaceView.holder.surface)
+        }
+    }
+
+    private fun detachVideoDecoderSurface() {
+        videoDecoder?.detach()
+        videoDecoder = null
+    }
 }

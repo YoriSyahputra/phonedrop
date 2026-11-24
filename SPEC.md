@@ -16,10 +16,10 @@ PhoneDrop v2 replaces PhoneDrop v1's HTTP/SSE/WebSocket polling model with a uni
 
 ### Resource & Technology Constraints
 - **Linux Desktop (`desktop-linux/`)**:
-  - Pure Go (`go 1.24+`, zero external Go module dependencies — standard library only + minimal CGo bindings for native `gtk+-3.0`, `gdk-x11-3.0`, and `ayatana-appindicator3-0.1`).
-  - Zero Electron, zero Chromium, zero WebKit runtime.
-  - Hardware-accelerated embedded display window using `GtkDrawingArea` X11 window ID (`--wid=<XID>`) controlled by `mpv` JSON IPC (`/tmp/phonedrop-mpv-<pid>.sock`) with `--hwdec=vaapi-copy --profile=low-latency --untimed`.
-  - Idle memory footprint target: **RSS `< 40 MB` (`40,960 KiB`)**.
+  - Pure Go (`go 1.24+`, zero external Go module dependencies — standard library only + minimal CGo bindings for native `x11`, `cairo-xlib`, XEmbed tray icon, and out-of-process `zenity` file picker).
+  - Zero Electron, zero Chromium, zero GTK/WebKit runtime inside the daemon process.
+  - Hardware-accelerated embedded display window using a native X11 child subwindow ID (`--wid=<XID>`) controlled by `mpv` JSON IPC (`/tmp/phonedrop-mpv-<pid>.sock`) with `--hwdec=auto-safe --profile=low-latency --untimed`.
+  - Idle memory footprint target: **RSS `< 40 MB` (`40,960 KiB`)** (measured ~9 MB headless / ~19 MB X11/Cairo GUI).
 - **Android Client (`android-client/`)**:
   - Modern Kotlin, `minSdk = 26`, `targetSdk = 34`, JVM 17.
   - Clean Architecture (`domain/`, `data/`, `service/`, `presentation/`) with Kotlin Coroutines & `StateFlow`/`SharedFlow`.
@@ -163,7 +163,7 @@ Total fixed payload = **57 bytes**:
    - Sender transitions from `InProgress` (`<= 99.9%`) to `Verified (100.0%)` **only after** receiving the peer's `0x04 FileDone` packet carrying `FlagAck` and matching `SHA-256`.
 4. **Throttled UI & Notification Cadence:**
    - **Android `FileTransferService` Notification:** Throttled to **<= 4 Hz (`>= 250 ms` between intermediate updates)**, while **0% (`FileInit`) and 100% (`FileDone`) bypass throttling unconditionally** so Android never drops the start or completion banner.
-   - **Android `StateFlow` / Compose UI & Linux GTK3 / CLI:** Throttled to `>= 50 ms` (`20 Hz`) using `g_idle_add` on GTK3 so UI rendering stays smooth even on a 2-core Celeron N4000.
+   - **Android `StateFlow` / Compose UI & Linux X11/Cairo / CLI:** Throttled to `>= 50 ms` (`20 Hz`) using a thread-safe wakeup pipe (`poll()`) on X11/Cairo so UI rendering stays smooth even on a 2-core Celeron N4000.
 
 ---
 
@@ -222,10 +222,10 @@ Total fixed payload = **57 bytes**:
 2. **Optional Zero-Prompt USB Bridge (`scrcpy_bridge.go`):**
    - When connected over USB ADB without opening the Android projection prompt, Linux can ingest raw H.264 directly via `adb exec-out screenrecord --output-format=h264 -` (or `scrcpy-server`) into the exact same Annex-B `nal_splitter` and `mpv` player.
 3. **Linux Embedded Hardware Display (`mpv_embed.go`):**
-   - GTK3 embeds an X11 `GtkDrawingArea` whose native XID (`GDK_WINDOW_XID`) is passed to:
-     `mpv --wid=<XID> --profile=low-latency --no-cache --untimed --hwdec=vaapi-copy --demuxer=h264 --input-ipc-server=<unixSock> fd://0`
+   - Native X11/Cairo hosts an embedded child X11 `Window` (`mirror_win`) whose XID is passed to:
+     `mpv --wid=<XID> --profile=low-latency --no-cache --untimed --hwdec=auto-safe --demuxer=lavf --demuxer-lavf-format=h264 --input-ipc-server=<unixSock> fd://0`
    - Incoming `0x05` NAL units are piped directly to `mpv` stdin; cached SPS/PPS headers are prepended automatically if needed.
-   - Mouse clicks, drags, and scroll events inside the `GtkDrawingArea` are normalized (`[0..65535]`) and sent to Android via `0x06 PacketInputEvent`.
+   - Mouse clicks inside `mirror_win` are normalized (`[0..65535]`) and sent to Android via `0x06 PacketInputEvent`.
 
 ### 5.2 Linux -> Phone (`StreamID = 0x02`)
 1. **Linux Hardware Screen Capture (`desktop_capture.go`):**
@@ -241,7 +241,7 @@ Total fixed payload = **57 bytes**:
 
 ## 6. Modular Directory Structure
 
-### 6.1 `desktop-linux/` (Pure Go 1.24+ Module + Thin CGo GTK3 UI)
+### 6.1 `desktop-linux/` (Pure Go 1.24+ Module + Thin CGo X11/Cairo UI)
 ```text
 desktop-linux/
 ├── go.mod                              # module phonedrop/v2/desktop (go 1.24, zero external Go deps)
@@ -276,8 +276,8 @@ desktop-linux/
 │       ├── phone_receiver.go           # 0x05 Phone->Linux frame ingestor feeding embedded mpv stdin
 │       └── scrcpy_bridge.go            # Optional ADB screenrecord / scrcpy-server USB fallback bridge
 ├── ui/
-│   ├── gtk_linux.go                    # Native GTK3 window + Ayatana AppIndicator tray + DrawingArea XID + g_idle_add
-│   ├── gtk_stub.go                     # !cgo / nogui stub fallback
+│   ├── x11_linux.go                    # Native X11/Cairo window + XEmbed tray + child XID + Zenity picker
+│   ├── ui_stub.go                      # !cgo / nogui stub fallback
 │   └── cli_progress.go                 # Terminal ANSI progress bar & speed/SHA-256 printer
 └── test/
     └── e2e_integration_test.go         # End-to-end TCP :28200 clip, 5MB chunked file, video, & input suite
