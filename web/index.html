@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b110e" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PhoneDrop" />
+    <meta name="description" content="Local Sync & Remote Control Utility (Laptop ⇄ HP)" />
+    <title>PhoneDrop</title>
+
+    <!-- PWA Icons & Manifest -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- Font Modern & Minimalis -->
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- Ambient Lighting untuk Efek Bias Glassmorphism -->
+    <div class="ambient-canvas" aria-hidden="true">
+      <div class="orb orb-forest"></div>
+      <div class="orb orb-espresso"></div>
+      <div class="orb orb-brass"></div>
+    </div>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="logo-dot"></span>
+          <h1>PhoneDrop</h1>
+        </div>
+        <div class="topbar-actions">
+          <button id="btn-pwa-install" class="btn-pwa-install hidden" title="Pasang PhoneDrop sebagai Aplikasi">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>Pasang App</span>
+          </button>
+          <div id="conn-badge" class="badge badge-disconnected">Terputus</div>
+          <button
+            id="btn-native-settings"
+            class="btn-icon hidden"
+            type="button"
+            title="Pengaturan Aplikasi &amp; Riwayat Direct Send"
+          >
+            ⚙️ Pengaturan
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- Panel Clipboard -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Clipboard Universal <span class="sub-h2">Laptop ⇄ HP</span></h2>
+          <span id="clip-time" class="meta-text">Siap sinkronisasi</span>
+        </div>
+        <textarea
+          id="clipboard-input"
+          rows="4"
+          placeholder="Salin teks di Laptop (otomatis muncul di sini) atau tempel teks dari HP untuk dikirim ke Laptop..."
+        ></textarea>
+        <div class="btn-group">
+          <button id="btn-send-clip" class="btn btn-primary" type="button">
+            Kirim ke Perangkat
+          </button>
+          <button id="btn-copy-local" class="btn btn-secondary" type="button">
+            Salin Manual
+          </button>
+        </div>
+        <!-- Hanya tampil di HTTPS (navigator.clipboard.readText tersedia) -->
+        <button
+          id="btn-paste-send"
+          class="btn btn-secondary btn-full btn-paste-send hidden"
+          type="button"
+        >
+          📋 Tempel &amp; Kirim dari Clipboard HP
+        </button>
+        <label id="auto-send-wrap" class="qr-toggle hidden">
+          <input type="checkbox" id="auto-send-check" />
+          <span>Kirim clipboard HP otomatis saat app dibuka</span>
+        </label>
+      </section>
+
+      <!-- Panel Kirim File + Opsi QR -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Kirim File <span class="sub-h2">Laptop ⇄ HP</span></h2>
+          <span class="meta-text">Jaringan Lokal • 0 Kuota</span>
+        </div>
+
+        <label for="file-input" class="dropzone" id="dropzone">
+          <input type="file" id="file-input" accept="*/*" multiple hidden />
+          <div class="dropzone-content">
+            <div class="drop-icon">✦</div>
+            <p class="drop-title">Ketuk atau tarik file ke sini</p>
+            <p class="drop-subtitle">
+              Kirim file ukuran besar via Wi-Fi lokal tanpa kuota
+            </p>
+          </div>
+        </label>
+
+        <div class="direct-send-banner">
+          <div class="direct-send-info">
+            <span id="direct-status-dot" class="status-dot dot-idle"></span>
+            <span id="direct-status-text">Direct Send: Mode Browser / Antrean Siaga</span>
+          </div>
+          <button id="btn-apk-modal" class="btn-icon" type="button" title="Unduh / Scan QR APK Android Background Service">
+            🤖 Pasang APK Service
+          </button>
+        </div>
+
+        <label class="qr-toggle">
+          <input type="checkbox" id="direct-send-check" checked />
+          <span>⚡ Direct Send: langsung simpan ke HP otomatis (Zero-Click)</span>
+        </label>
+
+        <label class="qr-toggle">
+          <input type="checkbox" id="auto-qr-check" />
+          <span>Tampilkan QR Code otomatis setelah memasukkan file</span>
+        </label>
+
+        <div id="progress-wrapper" class="progress-wrapper hidden">
+          <div class="progress-info">
+            <span id="progress-label">Mengirim via Wi-Fi Lokal...</span>
+            <span id="progress-percent">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div id="progress-bar-fill" class="progress-bar-fill"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel Remote Touchpad & Keyboard -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Remote Touchpad & Keyboard</h2>
+          <span class="meta-text">Wi-Fi Lokal</span>
+        </div>
+
+        <div id="touchpad-area" class="touchpad-area">
+          <span>Geser 1 jari = Kursor &nbsp;•&nbsp; Ketuk = Klik Kiri</span>
+        </div>
+
+        <div class="mouse-bar">
+          <button id="btn-click-left" class="btn btn-secondary" type="button">
+            Klik Kiri
+          </button>
+          <button id="btn-scroll-up" class="btn btn-secondary" type="button">
+            ▲ Scroll
+          </button>
+          <button id="btn-scroll-down" class="btn btn-secondary" type="button">
+            ▼ Scroll
+          </button>
+          <button id="btn-click-right" class="btn btn-secondary" type="button">
+            Klik Kanan
+          </button>
+        </div>
+
+        <div class="kbd-bar">
+          <input
+            type="text"
+            id="remote-kbd-input"
+            placeholder="Ketik teks ke Laptop..."
+            autocomplete="off"
+          />
+          <button id="btn-key-bs" class="btn btn-secondary" type="button">
+            ⌫
+          </button>
+          <button id="btn-key-enter" class="btn btn-primary" type="button">
+            ↵
+          </button>
+        </div>
+      </section>
+
+      <!-- Panel Daftar File -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Ruang File Bersama</h2>
+          <div class="card-header-actions">
+            <button id="btn-zip-all" class="btn-icon hidden" type="button" title="Unduh semua file dalam 1 arsip .zip">
+              📦 Unduh (.zip)
+            </button>
+            <button id="btn-qr-all" class="btn-icon hidden" type="button" title="Tampilkan 1 QR Code untuk mengunduh semua file (.zip)">
+              📱 QR Semua
+            </button>
+            <button id="btn-refresh-files" class="btn-icon" type="button">
+              Segarkan
+            </button>
+          </div>
+        </div>
+        <p class="helper-text">
+          Klik <strong>Kirim HP</strong> untuk Direct Send tanpa klik di HP, <strong>QR</strong> untuk scan kamera, atau
+          <strong>Simpan</strong> untuk mengunduh di perangkat ini.
+        </p>
+        <ul id="file-list" class="file-list">
+          <li class="empty-state">Memuat daftar file...</li>
+        </ul>
+      </section>
+    </main>
+
+    <!-- Modal Pop-up QR Code -->
+    <div id="qr-modal" class="modal-overlay hidden">
+      <div class="modal-box">
+        <h3 class="modal-title">Scan untuk Unduh Otomatis</h3>
+        <p id="qr-filename" class="modal-filename"></p>
+
+        <div id="qr-file-tabs" class="qr-tabs qr-tab hidden"></div>
+
+        <div class="qr-image-wrap">
+          <img id="qr-image" src="" alt="QR Code Download" />
+        </div>
+        <p id="qr-hint" class="modal-hint">
+          Arahkan kamera HP / Google Lens ke QR ini. File akan langsung terunduh
+          via Wi-Fi lokal tanpa memakan kuota data.
+        </p>
+        <a
+          id="qr-direct-link"
+          href="/phonedrop.apk"
+          download="PhoneDrop.apk"
+          class="btn btn-secondary btn-full hidden"
+          style="margin-bottom: 0.6rem; text-decoration: none;"
+        >
+          ⬇️ Unduh Langsung PhoneDrop.apk (37 KB)
+        </a>
+        <button
+          id="btn-close-qr"
+          class="btn btn-primary btn-full"
+          type="button"
+        >
+          Tutup
+        </button>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

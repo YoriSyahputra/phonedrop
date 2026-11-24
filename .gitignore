@@ -1,0 +1,24 @@
+# Legacy compiled binaries / APKs (PhoneDrop v1)
+/phonedrop
+/web/phonedrop.apk
+/web/phonedrop.apk.idsig
+
+# Go build outputs & test artifacts
+desktop-linux/bin/
+*.test
+*.out
+
+# Android / Gradle build outputs & local config
+android-client/.gradle/
+android-client/build/
+android-client/app/build/
+android-client/local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Runtime temporary files & sockets
+*.part
+*.sock
+.DS_Store

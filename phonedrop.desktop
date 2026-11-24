@@ -1,0 +1,20 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PhoneDrop
+GenericName=File Transfer & Remote Control
+Comment=Sinkronisasi Clipboard, File & Remote Control Laptop ⇄ HP
+Exec=/home/ysw/projects/phonedrop/phonedrop-launcher.sh
+Icon=phonedrop
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=true
+Actions=OpenDir;StopServer;
+
+[Desktop Action OpenDir]
+Name=Buka Folder PhoneDrop
+Exec=xdg-open /home/ysw/Downloads/PhoneDrop
+
+[Desktop Action StopServer]
+Name=Hentikan PhoneDrop
+Exec=/home/ysw/projects/phonedrop/phonedrop-launcher.sh --stop
