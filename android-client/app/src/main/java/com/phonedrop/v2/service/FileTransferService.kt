@@ -168,11 +168,11 @@ class FileTransferService : Service() {
             NOTIF_TRANSFER_BASE + ((nextNotifOffset++) % 100)
         }
 
-        val dirLabel = if (tr.direction == TransferDirection.SEND) "Sending" else "Receiving"
+        val dirLabel = if (tr.direction == TransferDirection.SEND) "Mengirim" else "Menerima"
         val title = when (tr.status) {
             TransferStatus.IN_PROGRESS -> "$dirLabel ${tr.fileName}"
-            TransferStatus.VERIFIED -> "Verified ✓ ${tr.fileName}"
-            TransferStatus.FAILED -> "Failed ✗ ${tr.fileName}"
+            TransferStatus.VERIFIED -> "Selesai: ${tr.fileName}"
+            TransferStatus.FAILED -> "Gagal: ${tr.fileName}"
         }
 
         val pctInt = tr.percent.toInt().coerceIn(0, 100)
@@ -236,7 +236,7 @@ class FileTransferService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("PhoneDrop v2")
+            .setContentTitle("PhoneDrop")
             .setContentText(statusText)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

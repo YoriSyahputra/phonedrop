@@ -1,7 +1,8 @@
 package com.phonedrop.v2.presentation.ui
 
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,13 +19,12 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -33,10 +33,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -79,7 +75,7 @@ import com.phonedrop.v2.presentation.MainViewModel
 import java.util.Locale
 import kotlin.math.roundToInt
 
-// PhoneDrop v1 Deep Botanical + Roasted Espresso + Champagne Brass palette
+// Deep Botanical + Roasted Espresso + Champagne Brass palette matching PhoneDrop desktop & v1
 private val BgDeep = Color(0xFF0B110E)
 private val CardSurface = Color(0xFF161E19)
 private val InnerSurface = Color(0xFF0E1511)
@@ -101,10 +97,11 @@ fun PhoneDropScreen(
     onCopyToPhoneClipboard: (String) -> Unit,
     onStartPhoneMirror: () -> Unit,
     onStopPhoneMirror: () -> Unit,
-    onSurfaceReady: (SurfaceView) -> Unit,
+    onSurfaceReady: (Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
     val connState by viewModel.connectionState.collectAsState()
+    val linkType by viewModel.linkType.collectAsState()
     val transfers by viewModel.transferList.collectAsState()
     val latestClip by viewModel.latestClipboard.collectAsState()
     val mirrorMode by viewModel.mirrorMode.collectAsState()
@@ -126,89 +123,93 @@ fun PhoneDropScreen(
         }
     }
 
+    val navItems = remember {
+        listOf(
+            GlassNavItem("File") { c -> NavIconFile(c) },
+            GlassNavItem("Clipboard") { c -> NavIconClipboard(c) },
+            GlassNavItem("Remote") { c -> NavIconRemote(c) },
+            GlassNavItem("Layar") { c -> NavIconScreen(c) }
+        )
+    }
+
     Scaffold(
         containerColor = BgDeep,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.padding(bottom = 86.dp)
+            )
+        },
         topBar = {
             BotanicalTopBar(
                 state = connState,
+                linkType = linkType,
                 onOpenSettings = { showConnDialog = true }
             )
-        },
-        bottomBar = {
-            NavigationBar(containerColor = Color(0xFF101713)) {
-                val navColors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = BrassLight,
-                    selectedTextColor = BrassLight,
-                    indicatorColor = Color(0xFF28221A),
-                    unselectedIconColor = TextMuted,
-                    unselectedTextColor = TextMuted
-                )
-                val tabs = listOf(
-                    "File" to "📁",
-                    "Clipboard" to "📋",
-                    "Remote" to "🖱️",
-                    "Layar" to "🖥️"
-                )
-                tabs.forEachIndexed { idx, (label, icon) ->
-                    NavigationBarItem(
-                        selected = selectedTab == idx,
-                        onClick = { selectedTab = idx },
-                        icon = { Text(icon, fontSize = 18.sp) },
-                        label = { Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
-                        colors = navColors
-                    )
-                }
-            }
         }
     ) { padding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(top = padding.calculateTopPadding())
         ) {
-            when (selectedTab) {
-                0 -> FilesTab(
-                    transfers = transfers,
-                    remoteFiles = remoteFiles,
-                    localFiles = localFiles,
-                    onPickFiles = onPickFiles,
-                    onRefreshFiles = { viewModel.requestFileList() },
-                    onPullRemoteFile = { viewModel.pullRemoteFile(it) },
-                    onDeleteRemoteFile = { viewModel.deleteRemoteFile(it) },
-                    onOpenLocalFile = onOpenFile,
-                    onShareLocalFile = onShareFile,
-                    onDeleteLocalFile = { viewModel.deleteLocalFile(it) }
-                )
-                1 -> ClipboardTab(
-                    latestClip = latestClip,
-                    onSendClip = { viewModel.sendClipboardText(it) },
-                    onPasteFromPhone = {
-                        val txt = onReadPhoneClipboard()
-                        if (txt.isNotBlank()) {
-                            viewModel.sendClipboardText(txt)
-                        }
-                        txt
-                    },
-                    onCopyToPhone = onCopyToPhoneClipboard
-                )
-                2 -> RemoteControlTab(
-                    onSendInput = { viewModel.sendInputEvent(it) }
-                )
-                3 -> ScreenMirrorTab(
-                    mirrorMode = mirrorMode,
-                    decoderStatus = decoderStatus,
-                    onStartDesktopView = { viewModel.startDesktopViewing() },
-                    onStopDesktopView = { viewModel.stopDesktopViewing() },
-                    onLaunchPhoneScrcpy = { viewModel.launchPhoneScrcpyOnLaptop() },
-                    onStartPhoneCast = onStartPhoneMirror,
-                    onStopPhoneCast = onStopPhoneMirror,
-                    onSurfaceReady = onSurfaceReady,
-                    onSurfaceDestroyed = onSurfaceDestroyed,
-                    onSendInput = { viewModel.sendInputEvent(it) }
-                )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                when (selectedTab) {
+                    0 -> FilesTab(
+                        transfers = transfers,
+                        remoteFiles = remoteFiles,
+                        localFiles = localFiles,
+                        onPickFiles = onPickFiles,
+                        onRefreshFiles = { viewModel.requestFileList() },
+                        onPullRemoteFile = { viewModel.pullRemoteFile(it) },
+                        onDeleteRemoteFile = { viewModel.deleteRemoteFile(it) },
+                        onOpenLocalFile = onOpenFile,
+                        onShareLocalFile = onShareFile,
+                        onDeleteLocalFile = { viewModel.deleteLocalFile(it) }
+                    )
+                    1 -> ClipboardTab(
+                        latestClip = latestClip,
+                        onSendClip = { viewModel.sendClipboardText(it) },
+                        onPasteFromPhone = {
+                            val txt = onReadPhoneClipboard()
+                            if (txt.isNotBlank()) {
+                                viewModel.sendClipboardText(txt)
+                            }
+                            txt
+                        },
+                        onCopyToPhone = onCopyToPhoneClipboard
+                    )
+                    2 -> RemoteControlTab(
+                        onSendInput = { viewModel.sendInputEvent(it) }
+                    )
+                    3 -> ScreenMirrorTab(
+                        mirrorMode = mirrorMode,
+                        decoderStatus = decoderStatus,
+                        onStartDesktopView = { viewModel.startDesktopViewing() },
+                        onStopDesktopView = { viewModel.stopDesktopViewing() },
+                        onLaunchPhoneScrcpy = { viewModel.launchPhoneScrcpyOnLaptop() },
+                        onStartPhoneCast = onStartPhoneMirror,
+                        onStopPhoneCast = onStopPhoneMirror,
+                        onSurfaceReady = onSurfaceReady,
+                        onSurfaceDestroyed = onSurfaceDestroyed,
+                        onSendInput = { viewModel.sendInputEvent(it) }
+                    )
+                }
             }
+
+            // Floating Apple-style Liquid Glass capsule navbar overlaid so content scrolls visibly beneath it
+            LiquidGlassNavBar(
+                items = navItems,
+                selectedIndex = selectedTab,
+                onSelect = { selectedTab = it },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+            )
         }
     }
 
@@ -222,7 +223,7 @@ fun PhoneDropScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Biarkan kosong untuk deteksi otomatis USB (adb reverse) atau Wi-Fi mDNS.",
+                        text = "Biarkan kosong untuk deteksi otomatis Kabel USB, Wireless ADB, atau Wi-Fi mDNS.",
                         fontSize = 13.sp
                     )
                     OutlinedTextField(
@@ -269,14 +270,21 @@ fun PhoneDropScreen(
 @Composable
 private fun BotanicalTopBar(
     state: ConnectionState,
+    linkType: String,
     onOpenSettings: () -> Unit
 ) {
+    val isUsbCable = linkType == "usb_cable"
+    val isWireless = linkType == "wireless_adb" || linkType == "wifi_lan" || state is ConnectionState.WifiConnected
+
     val (badgeText, badgeColor) = when (state) {
-        is ConnectionState.UsbConnected -> "USB Aktif" to SuccessGreen
-        is ConnectionState.WifiConnected -> "Wi-Fi Aktif" to SuccessGreen
+        is ConnectionState.UsbConnected -> when (linkType) {
+            "usb_cable" -> "Terhubung • Kabel USB" to SuccessGreen
+            "wireless_adb" -> "Terhubung • Wireless ADB" to SuccessGreen
+            else -> "Terhubung • ADB" to SuccessGreen
+        }
+        is ConnectionState.WifiConnected -> "Terhubung • Wi-Fi" to SuccessGreen
         is ConnectionState.Connecting -> "Menghubungkan..." to BrassLight
-        is ConnectionState.Error -> "Terputus" to DangerCoral
-        ConnectionState.Disconnected -> "Terputus" to DangerCoral
+        is ConnectionState.Error, ConnectionState.Disconnected -> "Terputus" to DangerCoral
     }
 
     Row(
@@ -287,13 +295,8 @@ private fun BotanicalTopBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(BrassLight)
-            )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PhoneDropLogoIcon()
             Text(
                 text = "PhoneDrop",
                 color = TextWarm,
@@ -303,23 +306,34 @@ private fun BotanicalTopBar(
         }
 
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
                     .background(badgeColor.copy(alpha = 0.14f))
                     .border(1.dp, badgeColor.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
                     .clickable { onOpenSettings() }
-                    .padding(horizontal = 12.dp, vertical = 5.dp)
+                    .padding(horizontal = 11.dp, vertical = 5.dp)
             ) {
-                Text(badgeText, color = badgeColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                if (state.isConnected) {
+                    if (isUsbCable && !isWireless) {
+                        IconUsbCable(badgeColor)
+                    } else if (isWireless) {
+                        IconWirelessWave(badgeColor)
+                    } else {
+                        IconUsbCable(badgeColor)
+                    }
+                }
+                Text(badgeText, color = badgeColor, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
             }
             OutlinedButton(
                 onClick = onOpenSettings,
                 border = BorderStroke(1.dp, CardBorder),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
                 modifier = Modifier.height(30.dp)
             ) {
-                Text("⚙️", fontSize = 13.sp)
+                IconSettingsSliders(BrassLight)
             }
         }
     }
@@ -338,9 +352,10 @@ private fun FilesTab(
     onShareLocalFile: (String, String) -> Unit,
     onDeleteLocalFile: (String) -> Unit
 ) {
-    var folderMode by remember { mutableIntStateOf(0) } // 0 = Laptop, 1 = Diterima HP
+    var folderMode by remember { mutableIntStateOf(0) }
 
     LazyColumn(
+        contentPadding = PaddingValues(bottom = 104.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier.fillMaxSize()
     ) {
@@ -359,8 +374,8 @@ private fun FilesTab(
                         .fillMaxWidth()
                         .padding(vertical = 20.dp, horizontal = 16.dp)
                 ) {
-                    Text("✦", color = BrassLight, fontSize = 24.sp)
-                    Spacer(Modifier.height(4.dp))
+                    IconUploadCloud(BrassLight)
+                    Spacer(Modifier.height(6.dp))
                     Text(
                         text = "Pilih & Kirim File ke Laptop",
                         color = TextWarm,
@@ -368,7 +383,7 @@ private fun FilesTab(
                         fontSize = 15.sp
                     )
                     Text(
-                        text = "Mendukung banyak file sekaligus • 0 Kuota • SHA-256",
+                        text = "Banyak file sekaligus • Jaringan Lokal • SHA-256",
                         color = TextMuted,
                         fontSize = 12.sp
                     )
@@ -528,7 +543,7 @@ private fun TransferProgressCard(
             ) {
                 val sub = when (tr.status) {
                     TransferStatus.IN_PROGRESS -> "${tr.chunkIndex}/${tr.totalChunks} blok • ${formatBytes(tr.bytesTransferred)}/${formatBytes(tr.totalBytes)}"
-                    TransferStatus.VERIFIED -> "SHA-256 Terverifikasi ✓ (${formatBytes(tr.totalBytes)})"
+                    TransferStatus.VERIFIED -> "SHA-256 Terverifikasi (${formatBytes(tr.totalBytes)})"
                     TransferStatus.FAILED -> tr.errorMessage ?: "Gagal memverifikasi integritas"
                 }
                 Text(sub, color = TextMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
@@ -573,7 +588,26 @@ private fun RemoteFileRowCard(
                     overflow = TextOverflow.Ellipsis,
                     fontSize = 14.sp
                 )
-                Text(formatBytes(entry.size), color = TextMuted, fontSize = 11.sp)
+                Spacer(Modifier.height(3.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(formatBytes(entry.size), color = TextMuted, fontSize = 11.sp)
+                    if (entry.origin == "phone" || entry.origin == "laptop") {
+                        val isPhone = entry.origin == "phone"
+                        val pillColor = if (isPhone) SuccessGreen else BrassLight
+                        val label = if (isPhone) "Dari HP" else "Dari Laptop"
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(pillColor.copy(alpha = 0.14f))
+                                .padding(horizontal = 7.dp, vertical = 1.dp)
+                        ) {
+                            Text(label, color = pillColor, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
             }
             Spacer(Modifier.width(8.dp))
             Button(
@@ -588,10 +622,10 @@ private fun RemoteFileRowCard(
             OutlinedButton(
                 onClick = onDelete,
                 border = BorderStroke(1.dp, DangerCoral.copy(alpha = 0.45f)),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
                 modifier = Modifier.height(32.dp)
             ) {
-                Text("✕", color = DangerCoral, fontSize = 12.sp)
+                IconCloseX(DangerCoral)
             }
         }
     }
@@ -619,7 +653,21 @@ private fun LocalFileRowCard(
                 overflow = TextOverflow.Ellipsis,
                 fontSize = 14.sp
             )
-            Text(formatBytes(file.sizeBytes), color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.height(3.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(formatBytes(file.sizeBytes), color = TextMuted, fontSize = 11.sp)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(BrassLight.copy(alpha = 0.14f))
+                        .padding(horizontal = 7.dp, vertical = 1.dp)
+                ) {
+                    Text("Diterima dari Laptop", color = BrassLight, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -666,70 +714,79 @@ private fun ClipboardTab(
         }
     }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = CardSurface),
-        border = BorderStroke(1.dp, CardBorder),
-        shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 104.dp)
     ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.padding(14.dp)
+        Card(
+            colors = CardDefaults.cardColors(containerColor = CardSurface),
+            border = BorderStroke(1.dp, CardBorder),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Clipboard Universal (Laptop ⇄ HP)", color = TextWarm, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            if (latestClip.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(InnerSurface)
-                        .border(1.dp, CardBorder, RoundedCornerShape(10.dp))
-                        .padding(10.dp)
-                ) {
-                    Text(
-                        text = "Terakhir disinkronkan: ${latestClip.take(240)}",
-                        color = BrassLight,
-                        fontSize = 12.sp
-                    )
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(14.dp)
+            ) {
+                Text("Clipboard Universal (Laptop - HP)", color = TextWarm, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                if (latestClip.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(InnerSurface)
+                            .border(1.dp, CardBorder, RoundedCornerShape(10.dp))
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            text = "Terakhir disinkronkan: ${latestClip.take(240)}",
+                            color = BrassLight,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
-            }
-            OutlinedTextField(
-                value = clipInput,
-                onValueChange = { clipInput = it },
-                placeholder = { Text("Tulis atau tempel teks untuk dikirim ke Laptop...") },
-                minLines = 4,
-                maxLines = 8,
-                colors = botanicalTextFieldColors(),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
-                    onClick = { onSendClip(clipInput.ifBlank { latestClip }) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Brass, contentColor = BgDeep),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Kirim ke Laptop", fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    value = clipInput,
+                    onValueChange = { clipInput = it },
+                    placeholder = { Text("Tulis atau tempel teks untuk dikirim ke Laptop...") },
+                    minLines = 4,
+                    maxLines = 8,
+                    colors = botanicalTextFieldColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { onSendClip(clipInput.ifBlank { latestClip }) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Brass, contentColor = BgDeep),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Kirim ke Laptop", fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val txt = clipInput.ifBlank { latestClip }
+                            if (txt.isNotBlank()) onCopyToPhone(txt)
+                        },
+                        border = BorderStroke(1.dp, CardBorder),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Salin ke HP", color = TextWarm)
+                    }
                 }
                 OutlinedButton(
                     onClick = {
-                        val txt = clipInput.ifBlank { latestClip }
-                        if (txt.isNotBlank()) onCopyToPhone(txt)
+                        val pasted = onPasteFromPhone()
+                        if (pasted.isNotBlank()) clipInput = pasted
                     },
-                    border = BorderStroke(1.dp, CardBorder),
-                    modifier = Modifier.weight(1f)
+                    border = BorderStroke(1.dp, Brass.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Salin ke HP", color = TextWarm)
+                    NavIconClipboard(BrassLight)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Tempel & Kirim dari Clipboard HP", color = BrassLight)
                 }
-            }
-            OutlinedButton(
-                onClick = {
-                    val pasted = onPasteFromPhone()
-                    if (pasted.isNotBlank()) clipInput = pasted
-                },
-                border = BorderStroke(1.dp, Brass.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("📋 Tempel & Kirim dari Clipboard HP", color = BrassLight)
             }
         }
     }
@@ -746,6 +803,7 @@ private fun RemoteControlTab(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .padding(bottom = 104.dp)
     ) {
         Card(
             colors = CardDefaults.cardColors(containerColor = CardSurface),
@@ -819,7 +877,9 @@ private fun RemoteControlTab(
                         contentPadding = PaddingValues(horizontal = 6.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("▲ Scroll", color = TextWarm, fontSize = 12.sp)
+                        IconChevronUp(TextWarm)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Scroll", color = TextWarm, fontSize = 12.sp)
                     }
                     OutlinedButton(
                         onClick = {
@@ -829,7 +889,9 @@ private fun RemoteControlTab(
                         contentPadding = PaddingValues(horizontal = 6.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("▼ Scroll", color = TextWarm, fontSize = 12.sp)
+                        IconChevronDown(TextWarm)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Scroll", color = TextWarm, fontSize = 12.sp)
                     }
                     OutlinedButton(
                         onClick = {
@@ -875,7 +937,7 @@ private fun RemoteControlTab(
                         border = BorderStroke(1.dp, CardBorder),
                         contentPadding = PaddingValues(horizontal = 10.dp)
                     ) {
-                        Text("⌫", color = TextWarm)
+                        IconBackspaceKey(TextWarm)
                     }
                     OutlinedButton(
                         onClick = {
@@ -884,7 +946,7 @@ private fun RemoteControlTab(
                         border = BorderStroke(1.dp, Brass),
                         contentPadding = PaddingValues(horizontal = 10.dp)
                     ) {
-                        Text("↵", color = BrassLight)
+                        IconEnterKey(BrassLight)
                     }
                 }
             }
@@ -901,7 +963,7 @@ private fun ScreenMirrorTab(
     onLaunchPhoneScrcpy: () -> Unit,
     onStartPhoneCast: () -> Unit,
     onStopPhoneCast: () -> Unit,
-    onSurfaceReady: (SurfaceView) -> Unit,
+    onSurfaceReady: (Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit,
     onSendInput: (InputEventPayload) -> Unit
 ) {
@@ -914,6 +976,7 @@ private fun ScreenMirrorTab(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .padding(bottom = 104.dp)
     ) {
         Card(
             colors = CardDefaults.cardColors(containerColor = CardSurface),
@@ -959,7 +1022,7 @@ private fun ScreenMirrorTab(
                 val statusStr = when (decoderStatus) {
                     DecoderStatus.Idle -> "Tekan 'Lihat Layar Laptop' untuk menampilkan layar Ubuntu."
                     DecoderStatus.WaitingForStream -> "Menunggu frame video H.264 dari Laptop..."
-                    is DecoderStatus.Live -> "Live ${decoderStatus.width}×${decoderStatus.height} • Ketuk layar untuk klik, geser untuk kursor"
+                    is DecoderStatus.Live -> "Live ${decoderStatus.width}x${decoderStatus.height} • Ketuk layar untuk klik, geser untuk kursor"
                     is DecoderStatus.Error -> "Status Codec: ${decoderStatus.message}"
                 }
                 Text(
@@ -970,6 +1033,7 @@ private fun ScreenMirrorTab(
             }
         }
 
+        // TextureView renders MediaCodec frames inside Compose cards/scroll views without Z-order hole-punch occlusion.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1007,23 +1071,31 @@ private fun ScreenMirrorTab(
         ) {
             AndroidView(
                 factory = { ctx ->
-                    SurfaceView(ctx).apply {
-                        holder.addCallback(object : SurfaceHolder.Callback {
-                            override fun surfaceCreated(holder: SurfaceHolder) {
-                                onSurfaceReady(this@apply)
+                    TextureView(ctx).apply {
+                        isOpaque = false
+                        var ownedSurface: Surface? = null
+                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                ownedSurface?.release()
+                                val s = Surface(st)
+                                ownedSurface = s
+                                onSurfaceReady(s)
                             }
-                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
+                            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
                                 onSurfaceDestroyed()
+                                ownedSurface?.release()
+                                ownedSurface = null
+                                return true
                             }
-                        })
+                            override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxSize()
             )
         }
 
-        // Quick Mouse + Keyboard controls right under desktop mirror
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
                 onClick = { onSendInput(InputEventPayload(InputConstants.INPUT_MOUSE_BUTTON, actionOrButton = 1, arg1 = 2)) },
@@ -1047,7 +1119,9 @@ private fun ScreenMirrorTab(
                 contentPadding = PaddingValues(horizontal = 6.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Text("▲ Scroll", color = TextWarm, fontSize = 11.sp)
+                IconChevronUp(TextWarm)
+                Spacer(Modifier.width(3.dp))
+                Text("Scroll", color = TextWarm, fontSize = 11.sp)
             }
             OutlinedButton(
                 onClick = { onSendInput(InputEventPayload(InputConstants.INPUT_SCROLL, y = -1)) },
@@ -1055,7 +1129,9 @@ private fun ScreenMirrorTab(
                 contentPadding = PaddingValues(horizontal = 6.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Text("▼ Scroll", color = TextWarm, fontSize = 11.sp)
+                IconChevronDown(TextWarm)
+                Spacer(Modifier.width(3.dp))
+                Text("Scroll", color = TextWarm, fontSize = 11.sp)
             }
         }
 
@@ -1089,7 +1165,7 @@ private fun ScreenMirrorTab(
                 border = BorderStroke(1.dp, Brass),
                 contentPadding = PaddingValues(horizontal = 10.dp)
             ) {
-                Text("↵", color = BrassLight)
+                IconEnterKey(BrassLight)
             }
         }
     }

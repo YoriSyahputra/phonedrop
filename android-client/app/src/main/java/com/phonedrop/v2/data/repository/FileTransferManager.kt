@@ -202,6 +202,10 @@ class FileTransferManager(
         onProgressCallback?.invoke(state)
     }
 
+    fun dismissTransfer(transferIdHex: String) {
+        _transfers.update { current -> current - transferIdHex }
+    }
+
     suspend fun handleFileInit(init: FileInitPayload) {
         val tidHex = init.transferId.toHexString()
         try {

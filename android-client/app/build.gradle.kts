@@ -3,6 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+base {
+    archivesName.set("PhoneDrop")
+}
+
 android {
     namespace = "com.phonedrop.v2"
     compileSdk = 34

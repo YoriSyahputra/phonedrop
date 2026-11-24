@@ -10,7 +10,7 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.view.SurfaceView
+import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -48,6 +48,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        window.statusBarColor = 0xFF0E1511.toInt()
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = 0xFF0B110E.toInt()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -71,7 +75,7 @@ class MainActivity : ComponentActivity() {
                     onCopyToPhoneClipboard = { copyToPhoneClipboard(it) },
                     onStartPhoneMirror = { requestScreenCapture() },
                     onStopPhoneMirror = { stopPhoneScreenCapture() },
-                    onSurfaceReady = { sv -> attachVideoDecoderSurface(sv) },
+                    onSurfaceReady = { surface -> attachVideoDecoderSurface(surface) },
                     onSurfaceDestroyed = { detachVideoDecoderSurface() }
                 )
             }
@@ -182,7 +186,7 @@ class MainActivity : ComponentActivity() {
         startService(intent)
     }
 
-    private fun attachVideoDecoderSurface(surfaceView: SurfaceView) {
+    private fun attachVideoDecoderSurface(surface: Surface) {
         detachVideoDecoderSurface()
         val holder = viewModel.sessionHolder
         val dec = VideoStreamDecoder(holder, holder.scope)
@@ -192,7 +196,7 @@ class MainActivity : ComponentActivity() {
                 viewModel.updateDecoderStatus(st)
             }
         }
-        dec.attachSurface(surfaceView.holder.surface)
+        dec.attachSurface(surface)
         if (viewModel.mirrorMode.value == MirrorMode.RECEIVING_LINUX_DESKTOP) {
             viewModel.startDesktopViewing()
         }

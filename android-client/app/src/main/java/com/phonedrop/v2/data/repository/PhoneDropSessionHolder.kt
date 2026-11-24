@@ -25,6 +25,7 @@ import com.phonedrop.v2.domain.repository.PhoneDropRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -43,18 +44,9 @@ class PhoneDropSessionHolder private constructor(
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val socketClient = BinarySocketClient(scope, MdnsDiscoveryManager(appContext))
-    val fileTransferManager = FileTransferManager(
-        socketClient = socketClient,
-        outputSink = MediaStoreTransferSink(appContext),
-        onProgressCallback = { state ->
-            if (state.direction == TransferDirection.RECEIVE && state.status == TransferStatus.VERIFIED) {
-                scope.launch { refreshLocalFiles() }
-            }
-        }
-    )
+    lateinit var fileTransferManager: FileTransferManager
 
     override val connectionState: StateFlow<ConnectionState> = socketClient.connectionState
-    override val transfers: StateFlow<Map<String, TransferState>> = fileTransferManager.transfers
 
     private val _latestClipboard = MutableStateFlow("")
     override val latestClipboard: StateFlow<String> = _latestClipboard.asStateFlow()
@@ -68,11 +60,17 @@ class PhoneDropSessionHolder private constructor(
     private val _localFiles = MutableStateFlow<List<LocalReceivedFile>>(emptyList())
     override val localFiles: StateFlow<List<LocalReceivedFile>> = _localFiles.asStateFlow()
 
+    private val _linkType = MutableStateFlow("")
+    val linkType: StateFlow<String> = _linkType.asStateFlow()
+
     private val _statusToast = MutableStateFlow<String?>(null)
     val statusToast: StateFlow<String?> = _statusToast.asStateFlow()
 
     private val _incomingVideoFrames = MutableSharedFlow<Pair<Int, VideoFramePayload>>(extraBufferCapacity = 96)
     val incomingVideoFrames: SharedFlow<Pair<Int, VideoFramePayload>> = _incomingVideoFrames.asSharedFlow()
+
+    override val transfers: StateFlow<Map<String, TransferState>>
+        get() = fileTransferManager.transfers
 
     @Volatile
     var onRemoteClipboardReceived: ((ClipPayload) -> Unit)? = null
@@ -81,12 +79,30 @@ class PhoneDropSessionHolder private constructor(
     private var lastOriginHash: ByteArray = ByteArray(0)
 
     init {
+        fileTransferManager = FileTransferManager(
+            socketClient = socketClient,
+            outputSink = MediaStoreTransferSink(appContext),
+            onProgressCallback = { state ->
+                if (state.status != TransferStatus.IN_PROGRESS) {
+                    if (state.direction == TransferDirection.RECEIVE && state.status == TransferStatus.VERIFIED) {
+                        scope.launch { refreshLocalFiles() }
+                    }
+                    scope.launch {
+                        delay(2500)
+                        fileTransferManager.dismissTransfer(state.transferIdHex)
+                    }
+                }
+            }
+        )
+
         scope.launch { refreshLocalFiles() }
 
         scope.launch {
             socketClient.connectionState.collect { st ->
                 if (st.isConnected) {
                     runCatching { requestFileList() }
+                } else {
+                    _linkType.value = ""
                 }
             }
         }
@@ -134,6 +150,7 @@ class PhoneDropSessionHolder private constructor(
     private fun handleControlMessage(ctrl: ControlMessage) {
         when (ctrl.op) {
             ControlOps.FILE_LIST -> _remoteFiles.value = ctrl.files
+            ControlOps.CONN_INFO -> if (ctrl.linkType.isNotBlank()) _linkType.value = ctrl.linkType
             ControlOps.ERROR -> if (ctrl.message.isNotBlank()) _statusToast.value = ctrl.message
         }
     }

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -27,6 +29,61 @@ import (
 	"phonedrop/v2/desktop/ui"
 )
 
+type originStore struct {
+	mu      sync.RWMutex
+	path    string
+	origins map[string]string // filename -> "phone" | "laptop"
+}
+
+func newOriginStore(path string) *originStore {
+	s := &originStore{
+		path:    path,
+		origins: make(map[string]string),
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &s.origins)
+	}
+	return s
+}
+
+func (s *originStore) Get(name string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.origins[name]
+}
+
+func (s *originStore) Set(name, origin string) {
+	if name == "" || origin == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.origins[name] == origin {
+		s.mu.Unlock()
+		return
+	}
+	s.origins[name] = origin
+	data, err := json.Marshal(s.origins)
+	s.mu.Unlock()
+	if err == nil && s.path != "" {
+		_ = os.MkdirAll(filepath.Dir(s.path), 0o755)
+		_ = os.WriteFile(s.path, data, 0o644)
+	}
+}
+
+func (s *originStore) Delete(name string) {
+	s.mu.Lock()
+	if _, ok := s.origins[name]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.origins, name)
+	data, err := json.Marshal(s.origins)
+	s.mu.Unlock()
+	if err == nil && s.path != "" {
+		_ = os.WriteFile(s.path, data, 0o644)
+	}
+}
+
 func main() {
 	debug.SetMemoryLimit(28 << 20)
 	port := flag.Int("port", protocol.DefaultPort, "TCP listen port for PDP2 tunnel")
@@ -38,13 +95,14 @@ func main() {
 	noMDNS := flag.Bool("no-mdns", false, "Disable mDNS LAN advertisement")
 	flag.Parse()
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("resolve home dir: %v", err)
+	}
 	if *destDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatalf("resolve home dir: %v", err)
-		}
 		*destDir = filepath.Join(home, "Downloads", "PhoneDrop")
 	}
+	origins := newOriginStore(filepath.Join(home, ".config", "phonedrop", "file-origins.json"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -63,6 +121,7 @@ func main() {
 	var adbSerial string
 	var tunnel *transport.TunnelServer
 	var fileEngine *transfer.Engine
+	var progressClearTimer *time.Timer
 
 	clipMgr := clipboard.NewManager()
 	desktopCap := mirror.NewDesktopCapture(mirror.CaptureConfig{}, nil)
@@ -78,15 +137,65 @@ func main() {
 		}
 	})
 
+	detectLinkInfo := func(s *transport.Session) (linkType string, label string) {
+		if s == nil {
+			return "", fmt.Sprintf("Siaga :%d", *port)
+		}
+		if s.Mode == transport.ModeWiFiLAN {
+			return "wifi_lan", "Terhubung • Wireless LAN"
+		}
+		uiMu.Lock()
+		ser := adbSerial
+		uiMu.Unlock()
+		ser = mirror.ResolveActiveADBSerial(ser)
+		if strings.Contains(ser, ":") || strings.Contains(strings.ToLower(ser), "tls") {
+			return "wireless_adb", "Terhubung • Wireless ADB"
+		}
+		return "usb_cable", "Terhubung • Kabel USB"
+	}
+
+	refreshConnBadge := func() {
+		var primary *transport.Session
+		if tunnel != nil {
+			primary = tunnel.PrimarySession()
+		}
+		linkType, label := detectLinkInfo(primary)
+		uiMu.Lock()
+		ctrl := guiCtrl
+		uiMu.Unlock()
+		if ctrl != nil {
+			ctrl.SetConnectionBadge(label, linkType, primary != nil)
+		}
+		if primary != nil {
+			if b, err := (protocol.ControlMessage{
+				Op:       protocol.ControlOpConnInfo,
+				LinkType: linkType,
+			}).Encode(); err == nil {
+				_ = primary.WriteFrame(protocol.PacketTypeControl, protocol.FlagDirLinuxToPhone, b)
+			}
+		}
+	}
+
+	setActivity := func(msg string) {
+		log.Println(msg)
+		uiMu.Lock()
+		ctrl := guiCtrl
+		uiMu.Unlock()
+		if ctrl != nil {
+			ctrl.SetActivityStatus(msg)
+		}
+	}
+
 	listSharedFiles := func() ([]protocol.RemoteFileEntry, []ui.FileRow) {
 		entries, err := os.ReadDir(*destDir)
 		if err != nil {
 			return nil, nil
 		}
 		type item struct {
-			name string
-			size int64
-			mod  int64
+			name   string
+			size   int64
+			mod    int64
+			origin string
 		}
 		var items []item
 		for _, ent := range entries {
@@ -98,9 +207,10 @@ func main() {
 				continue
 			}
 			items = append(items, item{
-				name: ent.Name(),
-				size: info.Size(),
-				mod:  info.ModTime().UnixMilli(),
+				name:   ent.Name(),
+				size:   info.Size(),
+				mod:    info.ModTime().UnixMilli(),
+				origin: origins.Get(ent.Name()),
 			})
 		}
 		sort.Slice(items, func(i, j int) bool {
@@ -110,8 +220,8 @@ func main() {
 		protoFiles := make([]protocol.RemoteFileEntry, len(items))
 		uiRows := make([]ui.FileRow, len(items))
 		for i, it := range items {
-			protoFiles[i] = protocol.RemoteFileEntry{Name: it.name, Size: it.size, ModMs: it.mod}
-			uiRows[i] = ui.FileRow{Name: it.name, Size: it.size, ModMs: it.mod}
+			protoFiles[i] = protocol.RemoteFileEntry{Name: it.name, Size: it.size, ModMs: it.mod, Origin: it.origin}
+			uiRows[i] = ui.FileRow{Name: it.name, Size: it.size, ModMs: it.mod, Origin: it.origin}
 		}
 		return protoFiles, uiRows
 	}
@@ -138,26 +248,65 @@ func main() {
 		}
 	}
 
-	updateStatus := func(msg string) {
-		log.Println(msg)
-		uiMu.Lock()
-		ctrl := guiCtrl
-		uiMu.Unlock()
-		if ctrl != nil {
-			connected := tunnel != nil && len(tunnel.Sessions()) > 0
-			ctrl.SetStatus(msg, connected)
+	stageLaptopFileToShared := func(srcPath string) {
+		absSrc, err1 := filepath.Abs(srcPath)
+		absDest, err2 := filepath.Abs(*destDir)
+		base := protocol.SanitizeFileName(filepath.Base(srcPath))
+		if err1 == nil && err2 == nil && filepath.Dir(absSrc) == absDest {
+			origins.Set(base, "laptop")
+			syncSharedFiles(nil)
+			return
 		}
+		dstPath := filepath.Join(*destDir, base)
+		if _, statErr := os.Stat(dstPath); os.IsNotExist(statErr) {
+			// Instant zero-copy hardlink when on same filesystem; copy small files (< 50 MB) across mounts.
+			if linkErr := os.Link(srcPath, dstPath); linkErr == nil {
+				origins.Set(base, "laptop")
+				syncSharedFiles(nil)
+				return
+			}
+			if info, err := os.Stat(srcPath); err == nil && info.Size() <= 50*1024*1024 {
+				if in, err := os.Open(srcPath); err == nil {
+					if out, err := os.Create(dstPath); err == nil {
+						_, _ = io.Copy(out, in)
+						_ = out.Close()
+						origins.Set(base, "laptop")
+					}
+					_ = in.Close()
+				}
+			}
+		} else {
+			origins.Set(base, "laptop")
+		}
+		syncSharedFiles(nil)
 	}
 
-	fileEngine, err := transfer.NewEngine(*destDir, func(rep transfer.ProgressReport) {
+	fileEngine, err = transfer.NewEngine(*destDir, func(rep transfer.ProgressReport) {
 		cliPrinter.Print(rep)
 		uiMu.Lock()
 		ctrl := guiCtrl
+		if progressClearTimer != nil {
+			progressClearTimer.Stop()
+			progressClearTimer = nil
+		}
+		if rep.Verified || rep.Err != nil {
+			if ctrl != nil {
+				progressClearTimer = time.AfterFunc(2500*time.Millisecond, func() {
+					ctrl.ClearProgress()
+				})
+			}
+		}
 		uiMu.Unlock()
+
 		if ctrl != nil {
 			ctrl.UpdateProgress(rep)
 		}
 		if rep.Verified {
+			if rep.Direction == transfer.DirectionReceive {
+				origins.Set(rep.FileName, "phone")
+			} else if rep.Direction == transfer.DirectionSend && origins.Get(rep.FileName) == "" {
+				origins.Set(rep.FileName, "laptop")
+			}
 			go syncSharedFiles(nil)
 		}
 	})
@@ -177,7 +326,8 @@ func main() {
 
 	handlers := transport.Handlers{
 		OnConnect: func(s *transport.Session) {
-			updateStatus(fmt.Sprintf("Terhubung • %s", s.Mode))
+			refreshConnBadge()
+			setActivity(fmt.Sprintf("Perangkat tersambung (%s)", s.RemoteAddr))
 			go func() {
 				syncSharedFiles(s)
 				if cur := clipMgr.Current(); cur != "" {
@@ -187,7 +337,7 @@ func main() {
 				}
 			}()
 		},
-		OnDisconnect: func(s *transport.Session, _ error) {
+		OnDisconnect: func(_ *transport.Session, _ error) {
 			if len(tunnel.Sessions()) == 0 {
 				desktopCap.Stop()
 				uiMu.Lock()
@@ -196,7 +346,8 @@ func main() {
 				if ctrl != nil {
 					ctrl.SetLinuxStreamActive(false)
 				}
-				updateStatus(fmt.Sprintf("Siaga :%d (USB / Wi-Fi)", *port))
+				refreshConnBadge()
+				setActivity("Menunggu koneksi HP (USB / Wireless)...")
 			}
 		},
 		OnClip: func(_ *transport.Session, clip protocol.ClipPayload) {
@@ -246,6 +397,7 @@ func main() {
 					sendControlErr(s, fmt.Sprintf("Gagal hapus %s: %v", safe, err))
 					return
 				}
+				origins.Delete(safe)
 				syncSharedFiles(nil)
 			case protocol.ControlOpStartDesktopStream, protocol.ControlOpRequestKeyframe:
 				_ = desktopCap.Start(ctx)
@@ -256,7 +408,7 @@ func main() {
 				if ctrl != nil {
 					ctrl.SetLinuxStreamActive(true)
 				}
-				updateStatus("Streaming Layar Laptop -> HP")
+				setActivity("Streaming Layar Laptop -> HP aktif")
 			case protocol.ControlOpStopDesktopStream:
 				desktopCap.Stop()
 				uiMu.Lock()
@@ -265,7 +417,7 @@ func main() {
 				if ctrl != nil {
 					ctrl.SetLinuxStreamActive(false)
 				}
-				updateStatus("Terhubung • Layar Laptop berhenti")
+				setActivity("Streaming Layar Laptop dihentikan")
 			case protocol.ControlOpStartPhoneScrcpy:
 				uiMu.Lock()
 				ser := adbSerial
@@ -273,13 +425,13 @@ func main() {
 				uiMu.Unlock()
 				if err := scrcpyMgr.Start(ser); err != nil {
 					sendControlErr(s, err.Error())
-					updateStatus(err.Error())
+					setActivity(err.Error())
 					return
 				}
 				if ctrl != nil {
 					ctrl.SetPhoneMirrorActive(true)
 				}
-				updateStatus("scrcpy Aktif (Layar HP -> Laptop)")
+				setActivity("scrcpy Aktif (Kontrol HP dari Laptop)")
 			case protocol.ControlOpStopPhoneScrcpy:
 				scrcpyMgr.Stop()
 				uiMu.Lock()
@@ -321,8 +473,9 @@ func main() {
 				adbSerial = ""
 			}
 			uiMu.Unlock()
+			refreshConnBadge()
 			if len(tunnel.Sessions()) == 0 {
-				updateStatus(fmt.Sprintf("ADB [%s] %s", ev.State, strings.TrimSpace(ev.Serial)))
+				setActivity(fmt.Sprintf("ADB [%s] %s", ev.State, strings.TrimSpace(ev.Serial)))
 			}
 		})
 		go watcher.Watch(ctx)
@@ -347,22 +500,27 @@ func main() {
 			OnSendFilePath: func(path string) {
 				sess := tunnel.PrimarySession()
 				if sess == nil {
-					updateStatus("Belum ada HP terhubung")
+					setActivity("Belum ada HP terhubung")
 					return
 				}
+				stageLaptopFileToShared(path)
 				if err := fileEngine.SendFile(ctx, sess, path, nil); err != nil {
-					updateStatus(fmt.Sprintf("Kirim gagal: %v", err))
+					setActivity(fmt.Sprintf("Kirim gagal: %v", err))
 				}
 			},
 			OnSendSharedFile: func(name string) {
 				sess := tunnel.PrimarySession()
 				if sess == nil {
-					updateStatus("Belum ada HP terhubung")
+					setActivity("Belum ada HP terhubung")
 					return
 				}
-				target := filepath.Join(*destDir, protocol.SanitizeFileName(name))
+				safe := protocol.SanitizeFileName(name)
+				if origins.Get(safe) == "" {
+					origins.Set(safe, "laptop")
+				}
+				target := filepath.Join(*destDir, safe)
 				if err := fileEngine.SendFile(ctx, sess, target, nil); err != nil {
-					updateStatus(fmt.Sprintf("Kirim gagal: %v", err))
+					setActivity(fmt.Sprintf("Kirim gagal: %v", err))
 				}
 			},
 			OnOpenFile: func(name string) {
@@ -370,8 +528,10 @@ func main() {
 				_ = exec.Command("xdg-open", target).Start()
 			},
 			OnDeleteSharedFile: func(name string) {
-				target := filepath.Join(*destDir, protocol.SanitizeFileName(name))
+				safe := protocol.SanitizeFileName(name)
+				target := filepath.Join(*destDir, safe)
 				if err := os.Remove(target); err == nil {
+					origins.Delete(safe)
 					syncSharedFiles(nil)
 				}
 			},
@@ -389,7 +549,7 @@ func main() {
 				b, err := clipboard.BuildClipPacket(text)
 				if err == nil {
 					tunnel.BroadcastFrame(protocol.PacketTypeClip, protocol.FlagDirLinuxToPhone, b)
-					updateStatus("Clipboard dikirim ke HP")
+					setActivity("Clipboard dikirim ke HP")
 				}
 			},
 			OnTogglePhoneMirror: func(active bool) {
@@ -399,25 +559,25 @@ func main() {
 				uiMu.Unlock()
 				if active {
 					if err := scrcpyMgr.Start(ser); err != nil {
-						updateStatus(err.Error())
+						setActivity(err.Error())
 						if c != nil {
 							c.SetPhoneMirrorActive(false)
 						}
 						return
 					}
-					updateStatus("scrcpy Aktif (Kontrol HP dari Laptop)")
+					setActivity("scrcpy Aktif (Kontrol HP dari Laptop)")
 				} else {
 					scrcpyMgr.Stop()
-					updateStatus("scrcpy dihentikan")
+					setActivity("scrcpy dihentikan")
 				}
 			},
 			OnToggleLinuxStream: func(active bool) {
 				if active {
 					_ = desktopCap.Start(ctx)
-					updateStatus("Streaming Layar Laptop -> HP")
+					setActivity("Streaming Layar Laptop -> HP aktif")
 				} else {
 					desktopCap.Stop()
-					updateStatus("Stream Layar Laptop berhenti")
+					setActivity("Streaming Layar Laptop dihentikan")
 				}
 			},
 			OnQuit: func() {
@@ -429,7 +589,7 @@ func main() {
 		guiCtrl = ctrl
 		uiMu.Unlock()
 
-		// Populate initial Ruang File Bersama & clipboard preview.
+		refreshConnBadge()
 		_, initialRows := listSharedFiles()
 		ctrl.SetFileList(initialRows)
 		if cur := clipMgr.Current(); cur != "" {
@@ -446,7 +606,7 @@ func main() {
 
 		ctrl.Run()
 	} else {
-		log.Printf("PhoneDrop v2 headless daemon listening on %s (dest: %s, clip: %s, input: %s)",
+		log.Printf("PhoneDrop headless daemon listening on %s (dest: %s, clip: %s, input: %s)",
 			tunnel.Addr(), *destDir, clipMgr.BackendName(), injector.EngineName())
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

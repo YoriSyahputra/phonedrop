@@ -41,6 +41,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val mirrorMode: StateFlow<MirrorMode> = sessionHolder.mirrorMode
     val remoteFiles: StateFlow<List<RemoteFileEntry>> = sessionHolder.remoteFiles
     val localFiles: StateFlow<List<LocalReceivedFile>> = sessionHolder.localFiles
+    val linkType: StateFlow<String> = sessionHolder.linkType
     val statusToast: StateFlow<String?> = sessionHolder.statusToast
 
     private val _decoderStatus = MutableStateFlow<DecoderStatus>(DecoderStatus.Idle)
