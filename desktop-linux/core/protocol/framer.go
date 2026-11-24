@@ -39,6 +39,7 @@ const (
 	PacketTypeFileDone   uint8 = 0x04
 	PacketTypeVideoFrame uint8 = 0x05
 	PacketTypeInputEvent uint8 = 0x06
+	PacketTypeControl    uint8 = 0x07
 )
 
 // Frame header flags bitmask.
@@ -110,9 +111,9 @@ func (f *Frame) DetachPayload() []byte {
 	return cp
 }
 
-// IsValidPacketType reports whether t is a defined PDP2 packet type (0x01..0x06).
+// IsValidPacketType reports whether t is a defined PDP2 packet type (0x01..0x07).
 func IsValidPacketType(t uint8) bool {
-	return t >= PacketTypeClip && t <= PacketTypeInputEvent
+	return t >= PacketTypeClip && t <= PacketTypeControl
 }
 
 // EncodeHeader writes h into dst, which must be at least HeaderSize bytes long.

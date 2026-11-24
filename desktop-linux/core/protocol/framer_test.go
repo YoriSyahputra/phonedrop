@@ -99,6 +99,21 @@ func TestAllPacketTypesRoundTrip(t *testing.T) {
 		t.Fatalf("write input: %v", err)
 	}
 
+	// 0x07 Control
+	ctrlIn := ControlMessage{
+		Op: ControlOpFileList,
+		Files: []RemoteFileEntry{
+			{Name: "notes.pdf", Size: 2048, ModMs: 1732490000000},
+		},
+	}
+	ctrlBytes, err := ctrlIn.Encode()
+	if err != nil {
+		t.Fatalf("encode control: %v", err)
+	}
+	if err := framer.WriteFrame(&wire, PacketTypeControl, FlagDirLinuxToPhone, ctrlBytes); err != nil {
+		t.Fatalf("write control: %v", err)
+	}
+
 	// Verify reads sequentially
 	r := bytes.NewReader(wire.Bytes())
 
@@ -181,6 +196,17 @@ func TestAllPacketTypesRoundTrip(t *testing.T) {
 	inpOut, err := DecodeInputEventPayload(f6.Payload)
 	if err != nil || inpOut != inpIn {
 		t.Fatalf("input mismatch: %+v vs %+v (err=%v)", inpOut, inpIn, err)
+	}
+
+	// 7. Control
+	f7, err := ReadFrame(r)
+	if err != nil {
+		t.Fatalf("read control: %v", err)
+	}
+	defer f7.Release()
+	ctrlOut, err := DecodeControlMessage(f7.Payload)
+	if err != nil || ctrlOut.Op != ControlOpFileList || len(ctrlOut.Files) != 1 || ctrlOut.Files[0].Name != "notes.pdf" {
+		t.Fatalf("control mismatch: %+v (err=%v)", ctrlOut, err)
 	}
 
 	if _, err := ReadFrame(r); !errors.Is(err, io.EOF) {

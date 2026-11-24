@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -326,3 +327,59 @@ func DecodeInputEventPayload(b []byte) (InputEventPayload, error) {
 	}
 	return p, nil
 }
+
+// Control operation names exchanged inside 0x07 PacketTypeControl JSON payloads.
+const (
+	ControlOpListFiles          = "list_files"
+	ControlOpFileList           = "file_list"
+	ControlOpPullFile           = "pull_file"
+	ControlOpDeleteFile         = "delete_file"
+	ControlOpStartDesktopStream = "start_desktop_stream"
+	ControlOpStopDesktopStream  = "stop_desktop_stream"
+	ControlOpStartPhoneScrcpy   = "start_phone_scrcpy"
+	ControlOpStopPhoneScrcpy    = "stop_phone_scrcpy"
+	ControlOpRequestKeyframe    = "request_keyframe"
+	ControlOpError              = "error"
+)
+
+// RemoteFileEntry describes a file in ~/Downloads/PhoneDrop for shared browsing.
+type RemoteFileEntry struct {
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	ModMs int64  `json:"mod_ms"`
+}
+
+// ControlMessage represents a 0x07 PacketTypeControl JSON command/response.
+type ControlMessage struct {
+	Op      string            `json:"op"`
+	Name    string            `json:"name,omitempty"`
+	Files   []RemoteFileEntry `json:"files,omitempty"`
+	Message string            `json:"message,omitempty"`
+	Width   int               `json:"width,omitempty"`
+	Height  int               `json:"height,omitempty"`
+}
+
+// Encode serializes ControlMessage into UTF-8 JSON bytes.
+func (c ControlMessage) Encode() ([]byte, error) {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(len(b)) > uint64(MaxPayloadSize) {
+		return nil, ErrPayloadTooLarge
+	}
+	return b, nil
+}
+
+// DecodeControlMessage parses a 0x07 PacketTypeControl JSON payload.
+func DecodeControlMessage(b []byte) (ControlMessage, error) {
+	var c ControlMessage
+	if err := json.Unmarshal(b, &c); err != nil {
+		return ControlMessage{}, fmt.Errorf("%w: invalid control json: %v", ErrMalformedPayload, err)
+	}
+	if c.Op == "" {
+		return ControlMessage{}, fmt.Errorf("%w: missing control op", ErrMalformedPayload)
+	}
+	return c, nil
+}
+

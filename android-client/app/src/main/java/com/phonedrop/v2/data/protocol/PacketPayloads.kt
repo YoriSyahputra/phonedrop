@@ -1,5 +1,7 @@
 package com.phonedrop.v2.data.protocol
 
+import org.json.JSONArray
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -335,6 +337,89 @@ data class InputEventPayload(
             val textBytes = ByteArray(textLen)
             bb.get(textBytes)
             return InputEventPayload(evType, action, x, y, arg1, arg2, String(textBytes, Charsets.UTF_8))
+        }
+    }
+}
+
+object ControlOps {
+    const val LIST_FILES = "list_files"
+    const val FILE_LIST = "file_list"
+    const val PULL_FILE = "pull_file"
+    const val DELETE_FILE = "delete_file"
+    const val START_DESKTOP_STREAM = "start_desktop_stream"
+    const val STOP_DESKTOP_STREAM = "stop_desktop_stream"
+    const val START_PHONE_SCRCPY = "start_phone_scrcpy"
+    const val STOP_PHONE_SCRCPY = "stop_phone_scrcpy"
+    const val REQUEST_KEYFRAME = "request_keyframe"
+    const val ERROR = "error"
+}
+
+data class RemoteFileEntry(
+    val name: String,
+    val size: Long,
+    val modMs: Long
+)
+
+data class ControlMessage(
+    val op: String,
+    val name: String = "",
+    val files: List<RemoteFileEntry> = emptyList(),
+    val message: String = "",
+    val width: Int = 0,
+    val height: Int = 0
+) {
+    fun encode(): ByteArray {
+        val obj = JSONObject().apply {
+            put("op", op)
+            if (name.isNotEmpty()) put("name", name)
+            if (message.isNotEmpty()) put("message", message)
+            if (width > 0) put("width", width)
+            if (height > 0) put("height", height)
+            if (files.isNotEmpty()) {
+                val arr = JSONArray()
+                files.forEach { f ->
+                    arr.put(JSONObject().apply {
+                        put("name", f.name)
+                        put("size", f.size)
+                        put("mod_ms", f.modMs)
+                    })
+                }
+                put("files", arr)
+            }
+        }
+        return obj.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    companion object {
+        fun decode(bytes: ByteArray): ControlMessage {
+            val obj = JSONObject(String(bytes, Charsets.UTF_8))
+            val op = obj.optString("op", "")
+            if (op.isEmpty()) throw ProtocolException("ControlMessage missing op")
+            val list = mutableListOf<RemoteFileEntry>()
+            val arr = obj.optJSONArray("files")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val n = item.optString("name", "")
+                    if (n.isNotEmpty()) {
+                        list.add(
+                            RemoteFileEntry(
+                                name = n,
+                                size = item.optLong("size", 0L),
+                                modMs = item.optLong("mod_ms", 0L)
+                            )
+                        )
+                    }
+                }
+            }
+            return ControlMessage(
+                op = op,
+                name = obj.optString("name", ""),
+                files = list,
+                message = obj.optString("message", ""),
+                width = obj.optInt("width", 0),
+                height = obj.optInt("height", 0)
+            )
         }
     }
 }

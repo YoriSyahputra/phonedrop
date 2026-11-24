@@ -83,6 +83,10 @@ class PacketFramerTest {
         )
         framer.writeFrame(wire, ProtocolConstants.PACKET_TYPE_INPUT_EVENT, 0, inputIn.encode())
 
+        // 0x07 Control
+        val ctrlBytes = """{"op":"list_files"}""".toByteArray(Charsets.UTF_8)
+        framer.writeFrame(wire, ProtocolConstants.PACKET_TYPE_CONTROL, 0, ctrlBytes)
+
         val rawBytes = wire.toByteArray()
         assertEquals('P'.code.toByte(), rawBytes[0])
         assertEquals('D'.code.toByte(), rawBytes[1])
@@ -119,6 +123,10 @@ class PacketFramerTest {
         val f6 = PacketFramer.readFrame(inp)!!
         val decodedInp = InputEventPayload.decode(f6.payload)
         assertEquals(inputIn, decodedInp)
+
+        val f7 = PacketFramer.readFrame(inp)!!
+        assertEquals(ProtocolConstants.PACKET_TYPE_CONTROL, f7.header.type)
+        assertArrayEquals(ctrlBytes, f7.payload)
 
         assertNull(PacketFramer.readFrame(inp))
     }

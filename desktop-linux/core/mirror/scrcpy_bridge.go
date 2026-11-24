@@ -2,17 +2,123 @@ package mirror
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"phonedrop/v2/desktop/core/protocol"
 )
 
+// ScrcpyManager launches and manages a standalone interactive scrcpy window
+// providing full 60fps Phone -> Linux screen mirroring with native mouse/keyboard control.
+type ScrcpyManager struct {
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	running atomic.Bool
+	onExit  func()
+}
+
+// NewScrcpyManager constructs a ScrcpyManager.
+func NewScrcpyManager(onExit func()) *ScrcpyManager {
+	return &ScrcpyManager{onExit: onExit}
+}
+
+// IsRunning reports whether a managed scrcpy session is active.
+func (m *ScrcpyManager) IsRunning() bool {
+	return m.running.Load()
+}
+
+// ResolveActiveADBSerial returns preferred if non-empty, otherwise queries `adb devices`
+// for the first authorized device (supporting both USB and wireless ADB serials).
+func ResolveActiveADBSerial(preferred string) string {
+	if strings.TrimSpace(preferred) != "" {
+		return strings.TrimSpace(preferred)
+	}
+	out, err := exec.Command("adb", "devices").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "List of devices") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == "device" {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+// Start launches scrcpy targeting serial (or auto-discovered ADB device).
+func (m *ScrcpyManager) Start(serial string) error {
+	if _, err := exec.LookPath("scrcpy"); err != nil {
+		return errors.New("scrcpy tidak ditemukan di sistem (/usr/bin/scrcpy)")
+	}
+
+	m.mu.Lock()
+	if m.running.Load() {
+		m.mu.Unlock()
+		return nil
+	}
+
+	target := ResolveActiveADBSerial(serial)
+	if target == "" {
+		m.mu.Unlock()
+		return errors.New("tidak ada HP ADB yang terhubung (cek USB / Wireless Debugging)")
+	}
+
+	args := []string{
+		"-s", target,
+		"--window-title=PhoneDrop — Layar HP",
+		"--stay-awake",
+		"--max-fps=60",
+		"--video-bit-rate=6M",
+	}
+	cmd := exec.Command("scrcpy", args...)
+	if err := cmd.Start(); err != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("gagal menjalankan scrcpy: %w", err)
+	}
+
+	m.cmd = cmd
+	m.running.Store(true)
+	cb := m.onExit
+	m.mu.Unlock()
+
+	go func() {
+		_ = cmd.Wait()
+		m.running.Store(false)
+		m.mu.Lock()
+		if m.cmd == cmd {
+			m.cmd = nil
+		}
+		m.mu.Unlock()
+		if cb != nil {
+			cb()
+		}
+	}()
+	return nil
+}
+
+// Stop terminates the running scrcpy window cleanly.
+func (m *ScrcpyManager) Stop() {
+	m.mu.Lock()
+	cmd := m.cmd
+	m.mu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
 // StartADBScreenStream captures an Android device's H.264 display stream directly over USB ADB
 // (`adb exec-out screenrecord --output-format=h264 -`) and feeds it into mpv.
-// Used as a zero-prompt fallback when MediaProjection APK capture is not active.
 func StartADBScreenStream(ctx context.Context, serial string, player *MPVPlayer) error {
 	if player == nil {
 		return fmt.Errorf("scrcpy_bridge: nil MPVPlayer")
@@ -61,7 +167,7 @@ func StartADBScreenStream(ctx context.Context, serial string, player *MPVPlayer)
 }
 
 // ForwardInputToADB executes normalized touch/text input on an ADB-connected phone when
-// mirroring via USB fallback.
+// mirroring via raw ADB fallback.
 func ForwardInputToADB(serial string, ev protocol.InputEventPayload, phoneW, phoneH int) {
 	if phoneW <= 0 {
 		phoneW = 1080

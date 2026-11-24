@@ -23,6 +23,7 @@ object ProtocolConstants {
     const val PACKET_TYPE_FILE_DONE: Byte = 0x04
     const val PACKET_TYPE_VIDEO_FRAME: Byte = 0x05
     const val PACKET_TYPE_INPUT_EVENT: Byte = 0x06
+    const val PACKET_TYPE_CONTROL: Byte = 0x07
 
     const val FLAG_ACK: Int = 0x01
     const val FLAG_ERROR: Int = 0x02
@@ -178,7 +179,7 @@ class PacketFramer {
             }
             val type = hdrBuf[5]
             val typeInt = type.toInt() and 0xFF
-            if (typeInt < 0x01 || typeInt > 0x06) {
+            if (typeInt < 0x01 || typeInt > 0x07) {
                 throw ProtocolException("Unknown packet type: $typeInt")
             }
             val flags = hdrBuf[6].toInt() and 0xFF

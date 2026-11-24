@@ -55,7 +55,7 @@ Every packet sent across TCP port `28200` begins with a fixed **16-byte header**
 |---|---|---|---|---|
 | `0..3` | 4B | `[4]byte` | `Magic` | `0x50, 0x44, 0x50, 0x32` (`"PDP2"`). Immediate disconnect on mismatch. |
 | `4` | 1B | `uint8` | `Version` | `0x02` (Protocol v2). |
-| `5` | 1B | `uint8` | `Type` | `0x01`=Clip, `0x02`=FileInit, `0x03`=FileChunk, `0x04`=FileDone, `0x05`=VideoFrame, `0x06`=InputEvent. |
+| `5` | 1B | `uint8` | `Type` | `0x01`=Clip, `0x02`=FileInit, `0x03`=FileChunk, `0x04`=FileDone, `0x05`=VideoFrame, `0x06`=InputEvent, `0x07`=Control. |
 | `6` | 1B | `uint8` | `Flags` | Bitmask (see table below). |
 | `7` | 1B | `uint8` | `Reserved` | Must be `0x00` on send; ignored on read for minor extensibility. |
 | `8..11` | 4B | `uint32` | `SeqID` | Per-connection monotonic sequence counter starting at `1`. |
@@ -73,7 +73,7 @@ Every packet sent across TCP port `28200` begins with a fixed **16-byte header**
 
 ---
 
-### 2.2 Packet Payload Schemas (`0x01` – `0x06`)
+### 2.2 Packet Payload Schemas (`0x01` – `0x07`)
 
 #### `0x01` — `PacketClip` (Clipboard Sync)
 ```text
@@ -146,6 +146,17 @@ Total fixed payload = **57 bytes**:
   - `0x06` `TextUTF8`: `Text` UTF-8 string to inject.
   - `0x07` `SwipeAbs`: start `(X, Y)` to end `(Arg1, Arg2)` normalized `[0..65535]`.
 
+#### `0x07` — `PacketControl` (Ruang File Bersama & Stream Control)
+UTF-8 JSON payload (`ControlMessage`):
+```json
+{
+  "op": "list_files | file_list | pull_file | delete_file | start_desktop_stream | stop_desktop_stream | start_phone_scrcpy | stop_phone_scrcpy | request_keyframe | error",
+  "name": "optional filename",
+  "files": [{"name": "example.pdf", "size": 1024, "mod_ms": 1732490000000}],
+  "message": "optional error message"
+}
+```
+
 ---
 
 ## 3. File Transfer Progress Architecture (Fixing v1 Progress Bugs)
@@ -216,26 +227,18 @@ Total fixed payload = **57 bytes**:
 ## 5. Bi-Directional Screen Mirroring Pipeline
 
 ### 5.1 Phone -> Linux (`StreamID = 0x01`)
-1. **Primary Capture Path (Android APK Native):**
-   - `ScreenCaptureService` (`FOREGROUND_SERVICE_MEDIA_PROJECTION`) binds `MediaProjection` + `VirtualDisplay` directly to `MediaCodec.createEncoderByType("video/avc")` input `Surface` (`COLOR_FormatSurface`, `KEY_BIT_RATE` adaptive, `KEY_FRAME_RATE = 30`, `KEY_I_FRAME_INTERVAL = 1`).
-   - Output Annex-B NAL buffers (`BUFFER_FLAG_CODEC_CONFIG` SPS/PPS and IDR/P-frames) are encapsulated in `0x05 PacketVideoFrame` packets and pushed over TCP `:28200`.
-2. **Optional Zero-Prompt USB Bridge (`scrcpy_bridge.go`):**
-   - When connected over USB ADB without opening the Android projection prompt, Linux can ingest raw H.264 directly via `adb exec-out screenrecord --output-format=h264 -` (or `scrcpy-server`) into the exact same Annex-B `nal_splitter` and `mpv` player.
-3. **Linux Embedded Hardware Display (`mpv_embed.go`):**
-   - Native X11/Cairo hosts an embedded child X11 `Window` (`mirror_win`) whose XID is passed to:
-     `mpv --wid=<XID> --profile=low-latency --no-cache --untimed --hwdec=auto-safe --demuxer=lavf --demuxer-lavf-format=h264 --input-ipc-server=<unixSock> fd://0`
-   - Incoming `0x05` NAL units are piped directly to `mpv` stdin; cached SPS/PPS headers are prepended automatically if needed.
-   - Mouse clicks inside `mirror_win` are normalized (`[0..65535]`) and sent to Android via `0x06 PacketInputEvent`.
+1. **Primary Interactive Mirroring (`scrcpy_bridge.go` -> `ScrcpyManager`):**
+   - Launches native `/usr/bin/scrcpy -s <serial> --window-title="PhoneDrop — Layar HP" --stay-awake --max-fps=60 --video-bit-rate=6M` supporting both USB and Wireless ADB (`192.168.1.3:37449`) with full 60fps mouse click, drag, scroll, and keyboard input.
+2. **MediaProjection & Optional USB Raw Fallback:**
+   - `ScreenCaptureService` (`FOREGROUND_SERVICE_MEDIA_PROJECTION`) binds `MediaProjection` + `VirtualDisplay` to `MediaCodec.createEncoderByType("video/avc")` (`0x05 PacketVideoFrame`), while `mpv_embed.go` / `StartADBScreenStream` handle raw Annex-B playback when needed.
 
 ### 5.2 Linux -> Phone (`StreamID = 0x02`)
-1. **Linux Hardware Screen Capture (`desktop_capture.go`):**
-   - Primary encoder: `ffmpeg -vaapi_device /dev/dri/renderD128 -f x11grab -framerate 30 -video_size <WxH> -i :0.0 -vf format=nv12,hwupload -c:v h264_vaapi -qp 26 -bf 0 -g 30 -f h264 pipe:1`.
-   - Automatic fallback (if VA-API unavailable): `libx264 -preset ultrafast -tune zerolatency -profile:v baseline -g 30 -f h264 pipe:1`.
-   - Go's streaming `nal_splitter.go` detects `00 00 00 01` / `00 00 01` start codes, tags SPS/PPS (`FlagCodecConfig`) and IDR (`FlagKeyframe`), caches the latest SPS/PPS pair on `TunnelServer`, and broadcasts `0x05 PacketVideoFrame` packets.
+1. **Linux Screen Capture (`desktop_capture.go`):**
+   - Captures the X11 desktop (`DetectX11ScreenSize`, e.g., `1366x768`) and scales to `1280x720` using `ffmpeg -f x11grab -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.1 -x264-params repeat-headers=1:keyint=24:min-keyint=12:bframes=0 -f h264 pipe:1`.
+   - Go's streaming `nal_splitter.go` detects `00 00 00 01` / `00 00 01` start codes, combines `SPS` (NAL type 7) + `PPS` (NAL type 8) into a single `FlagCodecConfig` packet cached on `TunnelServer`, and broadcasts IDR (`FlagKeyframe`) and P-frames over `0x05 PacketVideoFrame`.
 2. **Android Hardware Decode & Render (`VideoStreamDecoder.kt`):**
-   - `SurfaceView` supplies a native `Surface` directly to `MediaCodec.createDecoderByType("video/avc")` configured with `KEY_LOW_LATENCY = 1` (API 30+).
-   - `VideoStreamDecoder` queues incoming `0x05` NAL frames into `MediaCodec` input buffers and invokes `releaseOutputBuffer(index, true)` for zero-copy GPU rendering onto `SurfaceView`.
-   - Touch taps, swipes, and key events captured on the `SurfaceView` overlay are sent back via `0x06 PacketInputEvent` and executed on Linux via `xdotool` / `ydotool`.
+   - `VideoStreamDecoder` parses Annex-B `SPS` (`csd-0`) and `PPS` (`csd-1`) before configuring `MediaCodec` (`video/avc`, `KEY_LOW_LATENCY = 1` on API 30+), gates frame submission until the first IDR keyframe arrives, and drains decoded frames directly onto `SurfaceView`.
+   - Touch taps, cursor drags, scroll actions, and keyboard input on the `Layar` & `Remote` tabs are transmitted via `0x06 PacketInputEvent` and executed on Linux via `xdotool` / `ydotool`.
 
 ---
 

@@ -35,6 +35,7 @@ type Handlers struct {
 	OnFileDone   func(s *Session, flags uint8, done protocol.FileDonePayload)
 	OnVideoFrame func(s *Session, flags uint8, vid protocol.VideoFramePayload)
 	OnInputEvent func(s *Session, ev protocol.InputEventPayload)
+	OnControl    func(s *Session, payload []byte)
 }
 
 type cachedCodecConfig struct {
@@ -226,6 +227,10 @@ func (s *Session) dispatch(frame *protocol.Frame) {
 		if err == nil {
 			s.handlers.OnInputEvent(s, ev)
 		}
+	case protocol.PacketTypeControl:
+		if s.handlers.OnControl != nil {
+			s.handlers.OnControl(s, frame.DetachPayload())
+		}
 	}
 }
 
@@ -314,7 +319,7 @@ func (ts *TunnelServer) Serve(ctx context.Context) error {
 
 		wrappedHandlers.OnConnect = func(s *Session) {
 			ts.addSession(s)
-			ts.replayCachedCodecConfig(s)
+			ts.ReplayCodecConfig(s)
 			if origConnect != nil {
 				origConnect(s)
 			}
@@ -358,7 +363,11 @@ func (ts *TunnelServer) removeSession(id string) {
 	ts.sessMu.Unlock()
 }
 
-func (ts *TunnelServer) replayCachedCodecConfig(s *Session) {
+// ReplayCodecConfig sends any cached SPS/PPS codec configuration frame to s.
+func (ts *TunnelServer) ReplayCodecConfig(s *Session) {
+	if s == nil {
+		return
+	}
 	ts.sessMu.RLock()
 	configs := make([]cachedCodecConfig, 0, len(ts.codecConfig))
 	for _, cfg := range ts.codecConfig {

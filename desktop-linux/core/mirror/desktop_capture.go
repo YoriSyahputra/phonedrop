@@ -18,8 +18,10 @@ import (
 // CaptureConfig controls Linux X11 desktop H.264 capture parameters.
 type CaptureConfig struct {
 	Display     string
-	Width       int
-	Height      int
+	Width       int // source X11 capture width (auto-detected if 0)
+	Height      int // source X11 capture height (auto-detected if 0)
+	OutWidth    int // encoded output stream width (default 1280)
+	OutHeight   int // encoded output stream height (default 720)
 	FPS         int
 	PreferVAAPI bool
 }
@@ -27,8 +29,8 @@ type CaptureConfig struct {
 // FrameSink receives encoded Annex-B VideoFrame packets ready for transport.
 type FrameSink func(flags uint8, hdr protocol.VideoFrameHeader, nal []byte)
 
-// DesktopCapture runs ffmpeg x11grab (h264_vaapi with libx264 zerolatency fallback)
-// and streams parsed H.264 NAL units to FrameSink.
+// DesktopCapture runs ffmpeg x11grab (libx264 baseline zerolatency) and emits
+// combined SPS+PPS FlagCodecConfig frames plus IDR/P-frame VideoFrame packets.
 type DesktopCapture struct {
 	cfg     CaptureConfig
 	sink    FrameSink
@@ -55,15 +57,28 @@ func NewDesktopCapture(cfg CaptureConfig, sink FrameSink) *DesktopCapture {
 			cfg.Height = h
 		}
 	}
+	if cfg.OutWidth <= 0 {
+		cfg.OutWidth = 1280
+	}
+	if cfg.OutHeight <= 0 {
+		cfg.OutHeight = 720
+	}
+	cfg.OutWidth &^= 1
+	cfg.OutHeight &^= 1
 	if cfg.FPS <= 0 {
-		cfg.FPS = 30
+		cfg.FPS = 24
 	}
 	return &DesktopCapture{cfg: cfg, sink: sink}
 }
 
-// ScreenSize returns the configured capture width and height.
+// ScreenSize returns the real X11 desktop width and height for accurate InputInjector mapping.
 func (d *DesktopCapture) ScreenSize() (int, int) {
 	return d.cfg.Width, d.cfg.Height
+}
+
+// StreamSize returns the encoded H.264 output video width and height.
+func (d *DesktopCapture) StreamSize() (int, int) {
+	return d.cfg.OutWidth, d.cfg.OutHeight
 }
 
 // IsRunning reports whether desktop capture is currently active.
@@ -88,7 +103,7 @@ func (d *DesktopCapture) Start(ctx context.Context) error {
 	go func() {
 		defer close(done)
 		defer d.running.Store(false)
-		d.runLoop(cctx)
+		d.runFFmpeg(cctx)
 	}()
 	return nil
 }
@@ -110,115 +125,101 @@ func (d *DesktopCapture) Stop() {
 	}
 }
 
-func (d *DesktopCapture) runLoop(ctx context.Context) {
-	useVAAPI := d.cfg.PreferVAAPI && hasRenderNode("/dev/dri/renderD128")
-	if useVAAPI {
-		emitted := d.runFFmpeg(ctx, true)
-		if ctx.Err() != nil || emitted {
-			return
-		}
-	}
-	if ctx.Err() == nil {
-		_ = d.runFFmpeg(ctx, false)
-	}
-}
-
-func (d *DesktopCapture) runFFmpeg(ctx context.Context, vaapi bool) (emittedFrames bool) {
-	sizeArg := fmt.Sprintf("%dx%d", d.cfg.Width, d.cfg.Height)
+func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
+	inSize := fmt.Sprintf("%dx%d", d.cfg.Width, d.cfg.Height)
+	vf := fmt.Sprintf("scale=%d:%d,format=yuv420p", d.cfg.OutWidth, d.cfg.OutHeight)
 	fpsArg := strconv.Itoa(d.cfg.FPS)
+	x264Params := fmt.Sprintf("repeat-headers=1:keyint=%d:min-keyint=%d:bframes=0", d.cfg.FPS, d.cfg.FPS/2)
 
-	var args []string
-	if vaapi {
-		args = []string{
-			"-hide_banner", "-loglevel", "error",
-			"-vaapi_device", "/dev/dri/renderD128",
-			"-f", "x11grab", "-framerate", fpsArg, "-video_size", sizeArg, "-i", d.cfg.Display,
-			"-vf", "format=nv12,hwupload",
-			"-c:v", "h264_vaapi", "-qp", "26", "-bf", "0", "-g", fpsArg,
-			"-f", "h264", "pipe:1",
-		}
-	} else {
-		args = []string{
-			"-hide_banner", "-loglevel", "error",
-			"-f", "x11grab", "-framerate", fpsArg, "-video_size", sizeArg, "-i", d.cfg.Display,
-			"-pix_fmt", "yuv420p",
-			"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-profile:v", "baseline", "-bf", "0", "-g", fpsArg,
-			"-f", "h264", "pipe:1",
-		}
+	args := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-f", "x11grab", "-framerate", fpsArg, "-video_size", inSize, "-i", d.cfg.Display,
+		"-vf", vf,
+		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+		"-profile:v", "baseline", "-level", "3.1",
+		"-b:v", "2200k", "-maxrate", "2500k", "-bufsize", "1200k",
+		"-x264-params", x264Params,
+		"-f", "h264", "pipe:1",
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false
+		return
 	}
 	if err := cmd.Start(); err != nil {
-		return false
+		return
 	}
 
 	splitter := NewNALSplitter(protocol.CodecH264)
 	readBuf := make([]byte, 32*1024)
 	startNs := time.Now()
-	var frameCount uint64
+	var cachedSPS []byte
+
+	emitUnit := func(u NALUnit) {
+		if d.sink == nil || len(u.Data) == 0 {
+			return
+		}
+		ptsUs := uint64(time.Since(startNs).Microseconds())
+		hdr := protocol.VideoFrameHeader{
+			StreamID: protocol.StreamLinuxToPhone,
+			Codec:    protocol.CodecH264,
+			Width:    uint16(d.cfg.OutWidth),
+			Height:   uint16(d.cfg.OutHeight),
+			PtsUs:    ptsUs,
+		}
+
+		if u.IsConfig {
+			scLen := startCodePrefixLen(u.Data)
+			if scLen > 0 && len(u.Data) > scLen {
+				nalType := u.Data[scLen] & 0x1F
+				if nalType == 7 { // SPS — hold until PPS arrives so both cache/send together
+					cachedSPS = append([]byte(nil), u.Data...)
+					return
+				}
+				if nalType == 8 && len(cachedSPS) > 0 { // PPS -> combine [SPS][PPS]
+					combined := make([]byte, 0, len(cachedSPS)+len(u.Data))
+					combined = append(combined, cachedSPS...)
+					combined = append(combined, u.Data...)
+					d.sink(protocol.FlagDirLinuxToPhone|protocol.FlagCodecConfig, hdr, combined)
+					return
+				}
+			}
+			d.sink(protocol.FlagDirLinuxToPhone|protocol.FlagCodecConfig, hdr, u.Data)
+			return
+		}
+
+		flags := protocol.FlagDirLinuxToPhone
+		if u.IsKeyframe {
+			flags |= protocol.FlagKeyframe
+		}
+		d.sink(flags, hdr, u.Data)
+	}
 
 	for {
 		n, readErr := stdout.Read(readBuf)
 		if n > 0 {
-			splitter.Feed(readBuf[:n], func(u NALUnit) {
-				emittedFrames = true
-				frameCount++
-				flags := protocol.FlagDirLinuxToPhone
-				if u.IsConfig {
-					flags |= protocol.FlagCodecConfig
-				}
-				if u.IsKeyframe {
-					flags |= protocol.FlagKeyframe
-				}
-				ptsUs := uint64(time.Since(startNs).Microseconds())
-				if d.sink != nil {
-					d.sink(flags, protocol.VideoFrameHeader{
-						StreamID: protocol.StreamLinuxToPhone,
-						Codec:    protocol.CodecH264,
-						Width:    uint16(d.cfg.Width),
-						Height:   uint16(d.cfg.Height),
-						PtsUs:    ptsUs,
-					}, u.Data)
-				}
-			})
+			splitter.Feed(readBuf[:n], emitUnit)
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
-				splitter.Flush(func(u NALUnit) {
-					flags := protocol.FlagDirLinuxToPhone
-					if u.IsConfig {
-						flags |= protocol.FlagCodecConfig
-					}
-					if u.IsKeyframe {
-						flags |= protocol.FlagKeyframe
-					}
-					if d.sink != nil {
-						d.sink(flags, protocol.VideoFrameHeader{
-							StreamID: protocol.StreamLinuxToPhone,
-							Codec:    protocol.CodecH264,
-							Width:    uint16(d.cfg.Width),
-							Height:   uint16(d.cfg.Height),
-							PtsUs:    uint64(time.Since(startNs).Microseconds()),
-						}, u.Data)
-					}
-				})
+				splitter.Flush(emitUnit)
 			}
 			break
 		}
 	}
 
 	_ = cmd.Wait()
-	return emittedFrames || frameCount > 0
 }
 
-func hasRenderNode(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && !st.IsDir()
+func startCodePrefixLen(nal []byte) int {
+	if len(nal) >= 4 && nal[0] == 0x00 && nal[1] == 0x00 && nal[2] == 0x00 && nal[3] == 0x01 {
+		return 4
+	}
+	if len(nal) >= 3 && nal[0] == 0x00 && nal[1] == 0x00 && nal[2] == 0x01 {
+		return 3
+	}
+	return 0
 }
 
 var xrandrCurrentRe = regexp.MustCompile(`current\s+(\d+)\s*x\s*(\d+)`)
@@ -241,7 +242,6 @@ func DetectX11ScreenSize(display string) (int, int) {
 		w, _ := strconv.Atoi(m[1])
 		h, _ := strconv.Atoi(m[2])
 		if w > 0 && h > 0 {
-			// Ensure even dimensions required by H.264 encoders.
 			return w &^ 1, h &^ 1
 		}
 	}
