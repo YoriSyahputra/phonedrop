@@ -339,24 +339,27 @@ const (
 	ControlOpStartPhoneScrcpy   = "start_phone_scrcpy"
 	ControlOpStopPhoneScrcpy    = "stop_phone_scrcpy"
 	ControlOpRequestKeyframe    = "request_keyframe"
+	ControlOpConnInfo           = "conn_info"
 	ControlOpError              = "error"
 )
 
 // RemoteFileEntry describes a file in ~/Downloads/PhoneDrop for shared browsing.
 type RemoteFileEntry struct {
-	Name  string `json:"name"`
-	Size  int64  `json:"size"`
-	ModMs int64  `json:"mod_ms"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	ModMs  int64  `json:"mod_ms"`
+	Origin string `json:"origin,omitempty"` // "phone" | "laptop"
 }
 
 // ControlMessage represents a 0x07 PacketTypeControl JSON command/response.
 type ControlMessage struct {
-	Op      string            `json:"op"`
-	Name    string            `json:"name,omitempty"`
-	Files   []RemoteFileEntry `json:"files,omitempty"`
-	Message string            `json:"message,omitempty"`
-	Width   int               `json:"width,omitempty"`
-	Height  int               `json:"height,omitempty"`
+	Op       string            `json:"op"`
+	Name     string            `json:"name,omitempty"`
+	Files    []RemoteFileEntry `json:"files,omitempty"`
+	Message  string            `json:"message,omitempty"`
+	LinkType string            `json:"link_type,omitempty"` // "usb_cable" | "wireless_adb" | "wifi_lan"
+	Width    int               `json:"width,omitempty"`
+	Height   int               `json:"height,omitempty"`
 }
 
 // Encode serializes ControlMessage into UTF-8 JSON bytes.

@@ -129,7 +129,7 @@ func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
 	inSize := fmt.Sprintf("%dx%d", d.cfg.Width, d.cfg.Height)
 	vf := fmt.Sprintf("scale=%d:%d,format=yuv420p", d.cfg.OutWidth, d.cfg.OutHeight)
 	fpsArg := strconv.Itoa(d.cfg.FPS)
-	x264Params := fmt.Sprintf("repeat-headers=1:keyint=%d:min-keyint=%d:bframes=0", d.cfg.FPS, d.cfg.FPS/2)
+	x264Params := fmt.Sprintf("repeat-headers=1:sliced-threads=0:slices=1:annexb=1:keyint=%d:min-keyint=%d:bframes=0", d.cfg.FPS, d.cfg.FPS/2)
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
@@ -160,6 +160,16 @@ func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
 		if d.sink == nil || len(u.Data) == 0 {
 			return
 		}
+		norm := normalizeStartCode4(u.Data)
+		if len(norm) <= 4 {
+			return
+		}
+		nalType := norm[4] & 0x1F
+		// Skip SEI (6) and AUD (9) metadata units; Android MediaCodec prefers clean SPS/PPS + VCL slices.
+		if nalType == 6 || nalType == 9 {
+			return
+		}
+
 		ptsUs := uint64(time.Since(startNs).Microseconds())
 		hdr := protocol.VideoFrameHeader{
 			StreamID: protocol.StreamLinuxToPhone,
@@ -169,31 +179,27 @@ func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
 			PtsUs:    ptsUs,
 		}
 
-		if u.IsConfig {
-			scLen := startCodePrefixLen(u.Data)
-			if scLen > 0 && len(u.Data) > scLen {
-				nalType := u.Data[scLen] & 0x1F
-				if nalType == 7 { // SPS — hold until PPS arrives so both cache/send together
-					cachedSPS = append([]byte(nil), u.Data...)
-					return
-				}
-				if nalType == 8 && len(cachedSPS) > 0 { // PPS -> combine [SPS][PPS]
-					combined := make([]byte, 0, len(cachedSPS)+len(u.Data))
-					combined = append(combined, cachedSPS...)
-					combined = append(combined, u.Data...)
-					d.sink(protocol.FlagDirLinuxToPhone|protocol.FlagCodecConfig, hdr, combined)
-					return
-				}
+		if nalType == 7 { // SPS — cache and hold until PPS arrives so both cache/send together
+			cachedSPS = append([]byte(nil), norm...)
+			return
+		}
+		if nalType == 8 { // PPS -> combine [SPS][PPS]
+			if len(cachedSPS) > 0 {
+				combined := make([]byte, 0, len(cachedSPS)+len(norm))
+				combined = append(combined, cachedSPS...)
+				combined = append(combined, norm...)
+				d.sink(protocol.FlagDirLinuxToPhone|protocol.FlagCodecConfig, hdr, combined)
+			} else {
+				d.sink(protocol.FlagDirLinuxToPhone|protocol.FlagCodecConfig, hdr, norm)
 			}
-			d.sink(protocol.FlagDirLinuxToPhone|protocol.FlagCodecConfig, hdr, u.Data)
 			return
 		}
 
 		flags := protocol.FlagDirLinuxToPhone
-		if u.IsKeyframe {
+		if nalType == 5 || u.IsKeyframe {
 			flags |= protocol.FlagKeyframe
 		}
-		d.sink(flags, hdr, u.Data)
+		d.sink(flags, hdr, norm)
 	}
 
 	for {
@@ -212,14 +218,17 @@ func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
 	_ = cmd.Wait()
 }
 
-func startCodePrefixLen(nal []byte) int {
+func normalizeStartCode4(nal []byte) []byte {
 	if len(nal) >= 4 && nal[0] == 0x00 && nal[1] == 0x00 && nal[2] == 0x00 && nal[3] == 0x01 {
-		return 4
+		return nal
 	}
 	if len(nal) >= 3 && nal[0] == 0x00 && nal[1] == 0x00 && nal[2] == 0x01 {
-		return 3
+		out := make([]byte, len(nal)+1)
+		out[0] = 0x00
+		copy(out[1:], nal)
+		return out
 	}
-	return 0
+	return nal
 }
 
 var xrandrCurrentRe = regexp.MustCompile(`current\s+(\d+)\s*x\s*(\d+)`)

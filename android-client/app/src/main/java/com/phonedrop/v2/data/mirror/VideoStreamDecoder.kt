@@ -28,8 +28,9 @@ sealed class DecoderStatus {
 
 /**
  * Hardware MediaCodec H.264/H.265 decoder rendering incoming Linux desktop frames
- * (StreamID = STREAM_LINUX_TO_PHONE) directly onto an Android SurfaceView Surface.
- * Buffers SPS (csd-0) + PPS (csd-1) and gates decoding on the first IDR keyframe.
+ * (StreamID = STREAM_LINUX_TO_PHONE) directly onto an Android TextureView Surface.
+ * Ensures 4-byte Annex-B start codes, extracts csd-0 (SPS) + csd-1 (PPS), and gates
+ * decoding on the first IDR keyframe.
  */
 class VideoStreamDecoder(
     private val sessionHolder: PhoneDropSessionHolder,
@@ -93,7 +94,7 @@ class VideoStreamDecoder(
                 throw e
             } catch (e: Exception) {
                 Log.w("VideoStreamDecoder", "Decoder stream stopped: ${e.message}")
-                _status.value = DecoderStatus.Error(e.message ?: "Stream stopped")
+                _status.value = DecoderStatus.Error(e.message ?: "Stream berhenti")
             }
         }
     }
@@ -110,32 +111,25 @@ class VideoStreamDecoder(
         val nonConfigUnits = mutableListOf<ByteArray>()
         var packetHasKeyframe = (flags and ProtocolConstants.FLAG_KEYFRAME) != 0
 
-        for (u in units) {
-            val scLen = startCodeLen(u)
-            if (scLen <= 0 || u.size <= scLen) continue
+        for (raw in units) {
+            val u = ensureStartCode4(raw)
+            if (u.size <= 4) continue
             if (codecByte == VideoConstants.CODEC_H264) {
-                val nalType = u[scLen].toInt() and 0x1F
+                val nalType = u[4].toInt() and 0x1F
                 when (nalType) {
+                    6, 9 -> continue // skip SEI / AUD
                     7 -> {
-                        synchronized(lock) {
-                            if (cachedSps == null || !cachedSps!!.contentEquals(u)) {
-                                cachedSps = u
-                            }
-                        }
+                        synchronized(lock) { cachedSps = u }
                         continue
                     }
                     8 -> {
-                        synchronized(lock) {
-                            if (cachedPps == null || !cachedPps!!.contentEquals(u)) {
-                                cachedPps = u
-                            }
-                        }
+                        synchronized(lock) { cachedPps = u }
                         continue
                     }
                     5 -> packetHasKeyframe = true
                 }
             } else {
-                val nalType = (u[scLen].toInt() shr 1) and 0x3F
+                val nalType = (u[4].toInt() shr 1) and 0x3F
                 if (nalType in 32..34) continue
                 if (nalType in 19..21) packetHasKeyframe = true
             }
@@ -146,9 +140,7 @@ class VideoStreamDecoder(
         if (nonConfigUnits.isEmpty()) return
 
         if (!seenKeyframe) {
-            if (!packetHasKeyframe) {
-                return
-            }
+            if (!packetHasKeyframe) return
             seenKeyframe = true
         }
 
@@ -167,7 +159,12 @@ class VideoStreamDecoder(
 
         val codecFlags = if (packetHasKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
         try {
-            val inIdx = mc.dequeueInputBuffer(10_000)
+            val attempts = if (packetHasKeyframe) 4 else 1
+            var inIdx = -1
+            for (attempt in 0 until attempts) {
+                inIdx = mc.dequeueInputBuffer(25_000)
+                if (inIdx >= 0) break
+            }
             if (inIdx >= 0) {
                 val inputBuf = mc.getInputBuffer(inIdx) ?: return
                 inputBuf.clear()
@@ -177,6 +174,8 @@ class VideoStreamDecoder(
                 } else {
                     mc.queueInputBuffer(inIdx, 0, 0, ptsUs, 0)
                 }
+            } else if (packetHasKeyframe) {
+                seenKeyframe = false
             }
         } catch (e: Exception) {
             Log.w("VideoStreamDecoder", "Queue input error: ${e.message}")
@@ -184,7 +183,7 @@ class VideoStreamDecoder(
                 seenKeyframe = false
                 releaseDecoderLocked()
             }
-            _status.value = DecoderStatus.Error(e.message ?: "Decoder reset")
+            _status.value = DecoderStatus.Error(e.message ?: "Reset decoder")
         }
     }
 
@@ -228,6 +227,7 @@ class VideoStreamDecoder(
                 val mc = MediaCodec.createDecoderByType(mime)
                 mc.configure(format, surf, null, 0)
                 mc.start()
+                Log.i("VideoStreamDecoder", "Configured MediaCodec $mime ${width}x${height} (sps=${sps?.size} pps=${pps?.size})")
                 decoder = mc
                 currentWidth = width
                 currentHeight = height
@@ -252,7 +252,7 @@ class VideoStreamDecoder(
                 val active = synchronized(lock) { decoder === mc }
                 if (!active) break
                 try {
-                    val outIdx = mc.dequeueOutputBuffer(info, 10_000)
+                    val outIdx = mc.dequeueOutputBuffer(info, 16_000)
                     when {
                         outIdx >= 0 -> mc.releaseOutputBuffer(outIdx, true)
                         outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -315,9 +315,16 @@ class VideoStreamDecoder(
         return out
     }
 
-    private fun startCodeLen(u: ByteArray): Int {
-        if (u.size >= 4 && u[0] == 0.toByte() && u[1] == 0.toByte() && u[2] == 0.toByte() && u[3] == 1.toByte()) return 4
-        if (u.size >= 3 && u[0] == 0.toByte() && u[1] == 0.toByte() && u[2] == 1.toByte()) return 3
-        return 0
+    private fun ensureStartCode4(u: ByteArray): ByteArray {
+        if (u.size >= 4 && u[0] == 0.toByte() && u[1] == 0.toByte() && u[2] == 0.toByte() && u[3] == 1.toByte()) {
+            return u
+        }
+        if (u.size >= 3 && u[0] == 0.toByte() && u[1] == 0.toByte() && u[2] == 1.toByte()) {
+            return ByteArray(u.size + 1).also {
+                it[0] = 0
+                System.arraycopy(u, 0, it, 1, u.size)
+            }
+        }
+        return u
     }
 }

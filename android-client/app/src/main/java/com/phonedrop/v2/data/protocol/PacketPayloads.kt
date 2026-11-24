@@ -351,13 +351,15 @@ object ControlOps {
     const val START_PHONE_SCRCPY = "start_phone_scrcpy"
     const val STOP_PHONE_SCRCPY = "stop_phone_scrcpy"
     const val REQUEST_KEYFRAME = "request_keyframe"
+    const val CONN_INFO = "conn_info"
     const val ERROR = "error"
 }
 
 data class RemoteFileEntry(
     val name: String,
     val size: Long,
-    val modMs: Long
+    val modMs: Long,
+    val origin: String = ""
 )
 
 data class ControlMessage(
@@ -365,6 +367,7 @@ data class ControlMessage(
     val name: String = "",
     val files: List<RemoteFileEntry> = emptyList(),
     val message: String = "",
+    val linkType: String = "",
     val width: Int = 0,
     val height: Int = 0
 ) {
@@ -373,6 +376,7 @@ data class ControlMessage(
             put("op", op)
             if (name.isNotEmpty()) put("name", name)
             if (message.isNotEmpty()) put("message", message)
+            if (linkType.isNotEmpty()) put("link_type", linkType)
             if (width > 0) put("width", width)
             if (height > 0) put("height", height)
             if (files.isNotEmpty()) {
@@ -382,6 +386,7 @@ data class ControlMessage(
                         put("name", f.name)
                         put("size", f.size)
                         put("mod_ms", f.modMs)
+                        if (f.origin.isNotEmpty()) put("origin", f.origin)
                     })
                 }
                 put("files", arr)
@@ -406,7 +411,8 @@ data class ControlMessage(
                             RemoteFileEntry(
                                 name = n,
                                 size = item.optLong("size", 0L),
-                                modMs = item.optLong("mod_ms", 0L)
+                                modMs = item.optLong("mod_ms", 0L),
+                                origin = item.optString("origin", "")
                             )
                         )
                     }
@@ -417,6 +423,7 @@ data class ControlMessage(
                 name = obj.optString("name", ""),
                 files = list,
                 message = obj.optString("message", ""),
+                linkType = obj.optString("link_type", ""),
                 width = obj.optInt("width", 0),
                 height = obj.optInt("height", 0)
             )
