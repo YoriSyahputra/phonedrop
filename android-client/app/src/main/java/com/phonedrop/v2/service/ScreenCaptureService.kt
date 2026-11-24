@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import com.phonedrop.v2.data.mirror.ScreenCaptureEncoder
 import com.phonedrop.v2.data.repository.PhoneDropSessionHolder
 import com.phonedrop.v2.domain.model.MirrorMode
+import com.phonedrop.v2.presentation.DisplayRefreshRateHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -96,13 +97,14 @@ class ScreenCaptureService : Service() {
         val targetW = 720
         val scale = targetW.toFloat() / metrics.widthPixels.coerceAtLeast(1)
         val targetH = (metrics.heightPixels * scale).roundToInt().coerceAtLeast(720)
+        val maxHz = DisplayRefreshRateHelper.getMaxSupportedRefreshRate(this).roundToInt().coerceIn(60, 240)
 
         encoder?.stop()
         encoder = ScreenCaptureEncoder(sessionHolder, scope) {
             stopCleanly()
         }.also {
             sessionHolder.setMirrorMode(MirrorMode.SENDING_PHONE_SCREEN)
-            it.start(projection, targetW, targetH, metrics.densityDpi)
+            it.start(projection, targetW, targetH, metrics.densityDpi, maxHz)
         }
 
         return START_NOT_STICKY

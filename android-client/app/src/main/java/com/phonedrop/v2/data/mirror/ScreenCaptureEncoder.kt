@@ -43,7 +43,7 @@ class ScreenCaptureEncoder(
         }
     }
 
-    fun start(projection: MediaProjection, width: Int, height: Int, densityDpi: Int) {
+    fun start(projection: MediaProjection, width: Int, height: Int, densityDpi: Int, targetFps: Int = 60) {
         stop()
         val evenW = (width and 1.inv()).coerceAtLeast(360)
         val evenH = (height and 1.inv()).coerceAtLeast(640)
@@ -52,16 +52,33 @@ class ScreenCaptureEncoder(
         // Android 14 (API 34) requires callback registration BEFORE createVirtualDisplay.
         projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
 
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, evenW, evenH).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, 3_500_000)
-            setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+        val candidates = listOf(targetFps, 120, 90, 60, 30)
+            .filter { it in 30..240 && (it <= targetFps || it <= 60) }
+            .distinct()
+
+        var configuredCodec: MediaCodec? = null
+        for (fps in candidates) {
+            val bitrate = if (fps >= 90) 6_000_000 else 4_000_000
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, evenW, evenH).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            }
+            var attempt: MediaCodec? = null
+            try {
+                attempt = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                attempt.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                configuredCodec = attempt
+                break
+            } catch (e: Exception) {
+                Log.w("ScreenCaptureEncoder", "AVC encoder rejected ${fps}fps: ${e.message}")
+                runCatching { attempt?.release() }
+            }
         }
 
-        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        val codec = configuredCodec ?: return
         val surf = codec.createInputSurface()
         codec.start()
 

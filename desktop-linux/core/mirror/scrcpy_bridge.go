@@ -5,17 +5,58 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"phonedrop/v2/desktop/core/protocol"
 )
 
+var displayFPSPattern = regexp.MustCompile(`(?:fps|peakRefreshRate)=([0-9]+(?:\.[0-9]+)?)`)
+
+// ParseDisplayMaxRefreshRate extracts the highest supported panel refresh rate (60..240 Hz)
+// from Android `dumpsys display` output, returning 0 if none could be parsed.
+func ParseDisplayMaxRefreshRate(dumpsysOutput string) int {
+	maxHz := 0
+	for _, m := range displayFPSPattern.FindAllStringSubmatch(dumpsysOutput, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			continue
+		}
+		hz := int(math.Round(v))
+		if hz >= 60 && hz <= 240 && hz > maxHz {
+			maxHz = hz
+		}
+	}
+	return maxHz
+}
+
+// DetectPhoneMaxRefreshRate queries the connected Android device via ADB for its highest
+// supported display refresh rate (e.g. 144, 120, 90, 60). Returns 0 when unavailable.
+func DetectPhoneMaxRefreshRate(serial string) int {
+	target := ResolveActiveADBSerial(serial)
+	if target == "" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "adb", "-s", target, "shell", "dumpsys display").Output()
+	if err != nil {
+		return 0
+	}
+	return ParseDisplayMaxRefreshRate(string(out))
+}
+
 // ScrcpyManager launches and manages a standalone interactive scrcpy window
-// providing full 60fps Phone -> Linux screen mirroring with native mouse/keyboard control.
+// providing high-refresh-rate Phone -> Linux screen mirroring with native mouse/keyboard control.
 type ScrcpyManager struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -74,12 +115,15 @@ func (m *ScrcpyManager) Start(serial string) error {
 		return errors.New("tidak ada HP ADB yang terhubung (cek USB / Wireless Debugging)")
 	}
 
+	maxHz := DetectPhoneMaxRefreshRate(target)
 	args := []string{
 		"-s", target,
 		"--window-title=PhoneDrop — Layar HP",
 		"--stay-awake",
-		"--max-fps=60",
-		"--video-bit-rate=6M",
+		"--video-bit-rate=8M",
+	}
+	if maxHz > 0 {
+		args = append(args, fmt.Sprintf("--max-fps=%d", maxHz))
 	}
 	cmd := exec.Command("scrcpy", args...)
 	if err := cmd.Start(); err != nil {

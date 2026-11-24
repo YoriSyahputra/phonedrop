@@ -6,10 +6,13 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -31,6 +34,8 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private var videoDecoder: VideoStreamDecoder? = null
     private var decoderStatusJob: Job? = null
+    private var activeMaxHz: Float = 120f
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     private val openFilesLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
@@ -61,6 +66,20 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        activeMaxHz = DisplayRefreshRateHelper.applyMaxRefreshRate(this)
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        if (dm != null) {
+            val listener = object : DisplayManager.DisplayListener {
+                override fun onDisplayAdded(displayId: Int) = Unit
+                override fun onDisplayRemoved(displayId: Int) = Unit
+                override fun onDisplayChanged(displayId: Int) {
+                    activeMaxHz = DisplayRefreshRateHelper.applyMaxRefreshRate(this@MainActivity)
+                }
+            }
+            displayListener = listener
+            dm.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+        }
+
         viewModel.startServiceAndConnect()
         handleShareIntent(intent)
 
@@ -80,11 +99,23 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+
+        window.decorView.post {
+            activeMaxHz = DisplayRefreshRateHelper.applyMaxRefreshRate(this)
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        activeMaxHz = DisplayRefreshRateHelper.applyMaxRefreshRate(this)
         viewModel.refreshLocalFiles()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            activeMaxHz = DisplayRefreshRateHelper.applyMaxRefreshRate(this)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -93,6 +124,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        displayListener?.let { listener ->
+            (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)?.unregisterDisplayListener(listener)
+        }
+        displayListener = null
         detachVideoDecoderSurface()
         super.onDestroy()
     }
@@ -188,6 +223,7 @@ class MainActivity : ComponentActivity() {
 
     private fun attachVideoDecoderSurface(surface: Surface) {
         detachVideoDecoderSurface()
+        DisplayRefreshRateHelper.applySurfaceFrameRate(surface, activeMaxHz)
         val holder = viewModel.sessionHolder
         val dec = VideoStreamDecoder(holder, holder.scope)
         videoDecoder = dec
