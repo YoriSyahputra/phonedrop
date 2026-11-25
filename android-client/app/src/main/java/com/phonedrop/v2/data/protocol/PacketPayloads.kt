@@ -1,7 +1,5 @@
 package com.phonedrop.v2.data.protocol
 
-import org.json.JSONArray
-import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -351,8 +349,65 @@ object ControlOps {
     const val START_PHONE_SCRCPY = "start_phone_scrcpy"
     const val STOP_PHONE_SCRCPY = "stop_phone_scrcpy"
     const val REQUEST_KEYFRAME = "request_keyframe"
+    const val UPDATE_MIRROR_CONFIG = "update_mirror_config"
     const val CONN_INFO = "conn_info"
     const val ERROR = "error"
+}
+
+data class MirrorConfig(
+    val fps: Int = 0,               // 0 = Auto, 24, 30, 60, 90, 120, 144
+    val bitrateMbps: Int = 8,       // 2, 4, 8, 12, 16, 24
+    val maxSize: Int = 0,           // 0 = Native/Asli, 720, 1024, 1280, 1600, 1920
+    val audio: Boolean = true,      // true = Audio ON, false = --no-audio
+    val codec: String = "h264",     // "h264" | "h265"
+    val turnScreenOff: Boolean = false,
+    val stayAwake: Boolean = true,
+    val alwaysOnTop: Boolean = false,
+    val fullscreen: Boolean = false,
+    val showTouches: Boolean = false
+) {
+    fun sanitize(): MirrorConfig = copy(
+        fps = if (fps <= 0) 0 else fps.coerceIn(15, 240),
+        bitrateMbps = if (bitrateMbps <= 0) 8 else bitrateMbps.coerceIn(1, 50),
+        maxSize = if (maxSize <= 0) 0 else maxSize.coerceIn(480, 4096),
+        codec = if (codec == "h265" || codec == "hevc") "h265" else "h264"
+    )
+
+    fun toJsonString(): String = buildString {
+        append('{')
+        append("\"fps\":").append(fps)
+        append(",\"bitrate_mbps\":").append(bitrateMbps)
+        append(",\"max_size\":").append(maxSize)
+        append(",\"audio\":").append(audio)
+        append(",\"codec\":").append(jsonQuote(codec))
+        append(",\"turn_screen_off\":").append(turnScreenOff)
+        append(",\"stay_awake\":").append(stayAwake)
+        append(",\"always_on_top\":").append(alwaysOnTop)
+        append(",\"fullscreen\":").append(fullscreen)
+        append(",\"show_touches\":").append(showTouches)
+        append('}')
+    }
+
+    companion object {
+        fun fromJsonString(raw: String): MirrorConfig {
+            val map = MiniJsonParser(raw).parseObjectOrNull()
+                ?: throw ProtocolException("Invalid MirrorConfig JSON")
+            return fromMap(map)
+        }
+
+        internal fun fromMap(map: Map<String, Any?>): MirrorConfig = MirrorConfig(
+            fps = (map["fps"] as? Number)?.toInt() ?: 0,
+            bitrateMbps = (map["bitrate_mbps"] as? Number)?.toInt() ?: 8,
+            maxSize = (map["max_size"] as? Number)?.toInt() ?: 0,
+            audio = (map["audio"] as? Boolean) ?: true,
+            codec = (map["codec"] as? String) ?: "h264",
+            turnScreenOff = (map["turn_screen_off"] as? Boolean) ?: false,
+            stayAwake = (map["stay_awake"] as? Boolean) ?: true,
+            alwaysOnTop = (map["always_on_top"] as? Boolean) ?: false,
+            fullscreen = (map["fullscreen"] as? Boolean) ?: false,
+            showTouches = (map["show_touches"] as? Boolean) ?: false
+        ).sanitize()
+    }
 }
 
 data class RemoteFileEntry(
@@ -369,64 +424,209 @@ data class ControlMessage(
     val message: String = "",
     val linkType: String = "",
     val width: Int = 0,
-    val height: Int = 0
+    val height: Int = 0,
+    val mirror: MirrorConfig? = null
 ) {
     fun encode(): ByteArray {
-        val obj = JSONObject().apply {
-            put("op", op)
-            if (name.isNotEmpty()) put("name", name)
-            if (message.isNotEmpty()) put("message", message)
-            if (linkType.isNotEmpty()) put("link_type", linkType)
-            if (width > 0) put("width", width)
-            if (height > 0) put("height", height)
+        val json = buildString {
+            append("{\"op\":").append(jsonQuote(op))
+            if (name.isNotEmpty()) append(",\"name\":").append(jsonQuote(name))
+            if (message.isNotEmpty()) append(",\"message\":").append(jsonQuote(message))
+            if (linkType.isNotEmpty()) append(",\"link_type\":").append(jsonQuote(linkType))
+            if (width > 0) append(",\"width\":").append(width)
+            if (height > 0) append(",\"height\":").append(height)
+            if (mirror != null) append(",\"mirror\":").append(mirror.toJsonString())
             if (files.isNotEmpty()) {
-                val arr = JSONArray()
-                files.forEach { f ->
-                    arr.put(JSONObject().apply {
-                        put("name", f.name)
-                        put("size", f.size)
-                        put("mod_ms", f.modMs)
-                        if (f.origin.isNotEmpty()) put("origin", f.origin)
-                    })
+                append(",\"files\":[")
+                files.forEachIndexed { idx, f ->
+                    if (idx > 0) append(',')
+                    append("{\"name\":").append(jsonQuote(f.name))
+                    append(",\"size\":").append(f.size)
+                    append(",\"mod_ms\":").append(f.modMs)
+                    if (f.origin.isNotEmpty()) append(",\"origin\":").append(jsonQuote(f.origin))
+                    append('}')
                 }
-                put("files", arr)
+                append(']')
             }
+            append('}')
         }
-        return obj.toString().toByteArray(Charsets.UTF_8)
+        return json.toByteArray(Charsets.UTF_8)
     }
 
     companion object {
+        @Suppress("UNCHECKED_CAST")
         fun decode(bytes: ByteArray): ControlMessage {
-            val obj = JSONObject(String(bytes, Charsets.UTF_8))
-            val op = obj.optString("op", "")
+            val map = MiniJsonParser(String(bytes, Charsets.UTF_8)).parseObjectOrNull()
+                ?: throw ProtocolException("Invalid ControlMessage JSON")
+            val op = (map["op"] as? String).orEmpty()
             if (op.isEmpty()) throw ProtocolException("ControlMessage missing op")
+
             val list = mutableListOf<RemoteFileEntry>()
-            val arr = obj.optJSONArray("files")
-            if (arr != null) {
-                for (i in 0 until arr.length()) {
-                    val item = arr.optJSONObject(i) ?: continue
-                    val n = item.optString("name", "")
-                    if (n.isNotEmpty()) {
-                        list.add(
-                            RemoteFileEntry(
-                                name = n,
-                                size = item.optLong("size", 0L),
-                                modMs = item.optLong("mod_ms", 0L),
-                                origin = item.optString("origin", "")
-                            )
+            val rawFiles = map["files"] as? List<*>
+            rawFiles?.forEach { entry ->
+                val item = entry as? Map<String, Any?> ?: return@forEach
+                val n = (item["name"] as? String).orEmpty()
+                if (n.isNotEmpty()) {
+                    list.add(
+                        RemoteFileEntry(
+                            name = n,
+                            size = (item["size"] as? Number)?.toLong() ?: 0L,
+                            modMs = (item["mod_ms"] as? Number)?.toLong() ?: 0L,
+                            origin = (item["origin"] as? String).orEmpty()
                         )
-                    }
+                    )
                 }
             }
+            val mirrorMap = map["mirror"] as? Map<String, Any?>
             return ControlMessage(
                 op = op,
-                name = obj.optString("name", ""),
+                name = (map["name"] as? String).orEmpty(),
                 files = list,
-                message = obj.optString("message", ""),
-                linkType = obj.optString("link_type", ""),
-                width = obj.optInt("width", 0),
-                height = obj.optInt("height", 0)
+                message = (map["message"] as? String).orEmpty(),
+                linkType = (map["link_type"] as? String).orEmpty(),
+                width = (map["width"] as? Number)?.toInt() ?: 0,
+                height = (map["height"] as? Number)?.toInt() ?: 0,
+                mirror = mirrorMap?.let { MirrorConfig.fromMap(it) }
             )
+        }
+    }
+}
+
+private fun jsonQuote(value: String): String = buildString(value.length + 4) {
+    append('"')
+    for (ch in value) {
+        when (ch) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (ch.code < 0x20) append("\\u%04x".format(ch.code)) else append(ch)
+        }
+    }
+    append('"')
+}
+
+private class MiniJsonParser(private val src: String) {
+    private var idx = 0
+
+    fun parseObjectOrNull(): Map<String, Any?>? {
+        skipWs()
+        if (idx >= src.length || src[idx] != '{') return null
+        return runCatching { parseObject() }.getOrNull()
+    }
+
+    private fun skipWs() {
+        while (idx < src.length && src[idx].isWhitespace()) idx++
+    }
+
+    private fun parseValue(): Any? {
+        skipWs()
+        if (idx >= src.length) throw IllegalStateException("EOF")
+        return when (src[idx]) {
+            '{' -> parseObject()
+            '[' -> parseArray()
+            '"' -> parseString()
+            't' -> if (src.startsWith("true", idx)) { idx += 4; true } else throw IllegalStateException("bad bool")
+            'f' -> if (src.startsWith("false", idx)) { idx += 5; false } else throw IllegalStateException("bad bool")
+            'n' -> if (src.startsWith("null", idx)) { idx += 4; null } else throw IllegalStateException("bad null")
+            else -> parseNumber()
+        }
+    }
+
+    private fun parseObject(): Map<String, Any?> {
+        idx++ // '{'
+        val out = LinkedHashMap<String, Any?>()
+        skipWs()
+        if (idx < src.length && src[idx] == '}') {
+            idx++
+            return out
+        }
+        while (idx < src.length) {
+            skipWs()
+            val key = parseString()
+            skipWs()
+            if (idx >= src.length || src[idx] != ':') throw IllegalStateException("expected ':'")
+            idx++
+            out[key] = parseValue()
+            skipWs()
+            if (idx < src.length && src[idx] == ',') {
+                idx++
+            } else if (idx < src.length && src[idx] == '}') {
+                idx++
+                return out
+            } else {
+                throw IllegalStateException("expected ',' or '}'")
+            }
+        }
+        return out
+    }
+
+    private fun parseArray(): List<Any?> {
+        idx++ // '['
+        val out = ArrayList<Any?>()
+        skipWs()
+        if (idx < src.length && src[idx] == ']') {
+            idx++
+            return out
+        }
+        while (idx < src.length) {
+            out.add(parseValue())
+            skipWs()
+            if (idx < src.length && src[idx] == ',') {
+                idx++
+            } else if (idx < src.length && src[idx] == ']') {
+                idx++
+                return out
+            } else {
+                throw IllegalStateException("expected ',' or ']'")
+            }
+        }
+        return out
+    }
+
+    private fun parseString(): String {
+        if (src[idx] != '"') throw IllegalStateException("expected quote")
+        idx++
+        val sb = StringBuilder()
+        while (idx < src.length) {
+            val ch = src[idx++]
+            when (ch) {
+                '"' -> return sb.toString()
+                '\\' -> {
+                    if (idx >= src.length) throw IllegalStateException("dangling escape")
+                    when (val esc = src[idx++]) {
+                        '"', '\\', '/' -> sb.append(esc)
+                        'b' -> sb.append('\b')
+                        'f' -> sb.append('\u000C')
+                        'n' -> sb.append('\n')
+                        'r' -> sb.append('\r')
+                        't' -> sb.append('\t')
+                        'u' -> {
+                            if (idx + 4 > src.length) throw IllegalStateException("short unicode")
+                            sb.append(src.substring(idx, idx + 4).toInt(16).toChar())
+                            idx += 4
+                        }
+                        else -> sb.append(esc)
+                    }
+                }
+                else -> sb.append(ch)
+            }
+        }
+        throw IllegalStateException("unterminated string")
+    }
+
+    private fun parseNumber(): Number {
+        val start = idx
+        if (src[idx] == '-') idx++
+        while (idx < src.length && (src[idx].isDigit() || src[idx] == '.' || src[idx] == 'e' || src[idx] == 'E' || src[idx] == '+' || src[idx] == '-')) {
+            idx++
+        }
+        val token = src.substring(start, idx)
+        return if (token.contains('.') || token.contains('e') || token.contains('E')) {
+            token.toDouble()
+        } else {
+            token.toLong()
         }
     }
 }

@@ -1,11 +1,14 @@
 package com.phonedrop.v2
 
 import com.phonedrop.v2.data.protocol.ClipPayload
+import com.phonedrop.v2.data.protocol.ControlMessage
+import com.phonedrop.v2.data.protocol.ControlOps
 import com.phonedrop.v2.data.protocol.FileChunkPayload
 import com.phonedrop.v2.data.protocol.FileDonePayload
 import com.phonedrop.v2.data.protocol.FileInitPayload
 import com.phonedrop.v2.data.protocol.InputConstants
 import com.phonedrop.v2.data.protocol.InputEventPayload
+import com.phonedrop.v2.data.protocol.MirrorConfig
 import com.phonedrop.v2.data.protocol.PacketFramer
 import com.phonedrop.v2.data.protocol.ProtocolConstants
 import com.phonedrop.v2.data.protocol.ProtocolException
@@ -147,5 +150,25 @@ class PacketFramerTest {
         )
         val res = PacketFramer.readFrame(ByteArrayInputStream(hdr))
         assertNotNull(res)
+    }
+
+    @Test
+    fun mirrorConfigControlMessageRoundTrip() {
+        val cfg = MirrorConfig(
+            fps = 144,
+            bitrateMbps = 16,
+            maxSize = 1280,
+            audio = false,
+            codec = "h265",
+            turnScreenOff = true,
+            stayAwake = true,
+            alwaysOnTop = true,
+            fullscreen = false,
+            showTouches = true
+        )
+        val encoded = ControlMessage(op = ControlOps.UPDATE_MIRROR_CONFIG, mirror = cfg).encode()
+        val decoded = ControlMessage.decode(encoded)
+        assertEquals(ControlOps.UPDATE_MIRROR_CONFIG, decoded.op)
+        assertEquals(cfg, decoded.mirror)
     }
 }

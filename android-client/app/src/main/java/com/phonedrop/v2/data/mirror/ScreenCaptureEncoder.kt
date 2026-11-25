@@ -43,7 +43,14 @@ class ScreenCaptureEncoder(
         }
     }
 
-    fun start(projection: MediaProjection, width: Int, height: Int, densityDpi: Int, targetFps: Int = 60) {
+    fun start(
+        projection: MediaProjection,
+        width: Int,
+        height: Int,
+        densityDpi: Int,
+        targetFps: Int = 60,
+        bitrateBps: Int = 0
+    ) {
         stop()
         val evenW = (width and 1.inv()).coerceAtLeast(360)
         val evenH = (height and 1.inv()).coerceAtLeast(640)
@@ -53,12 +60,12 @@ class ScreenCaptureEncoder(
         projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
 
         val candidates = listOf(targetFps, 120, 90, 60, 30)
-            .filter { it in 30..240 && (it <= targetFps || it <= 60) }
+            .filter { it in 15..240 && (it <= targetFps || it <= 60) }
             .distinct()
 
         var configuredCodec: MediaCodec? = null
         for (fps in candidates) {
-            val bitrate = if (fps >= 90) 6_000_000 else 4_000_000
+            val bitrate = if (bitrateBps > 0) bitrateBps else if (fps >= 90) 6_000_000 else 4_000_000
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, evenW, evenH).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrate)

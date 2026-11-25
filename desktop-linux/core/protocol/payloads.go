@@ -339,9 +339,67 @@ const (
 	ControlOpStartPhoneScrcpy   = "start_phone_scrcpy"
 	ControlOpStopPhoneScrcpy    = "stop_phone_scrcpy"
 	ControlOpRequestKeyframe    = "request_keyframe"
+	ControlOpUpdateMirrorConfig = "update_mirror_config"
 	ControlOpConnInfo           = "conn_info"
 	ControlOpError              = "error"
 )
+
+// MirrorConfig controls bi-directional screen mirroring quality, FPS, audio, and scrcpy flags.
+type MirrorConfig struct {
+	FPS           int    `json:"fps"`             // 0 = Auto, 24, 30, 60, 90, 120, 144
+	BitrateMbps   int    `json:"bitrate_mbps"`    // 2, 4, 8, 12, 16, 24
+	MaxSize       int    `json:"max_size"`        // 0 = Native/Asli, 720, 1024, 1280, 1600, 1920
+	Audio         bool   `json:"audio"`           // true = Audio ON, false = --no-audio
+	Codec         string `json:"codec,omitempty"` // "h264" | "h265"
+	TurnScreenOff bool   `json:"turn_screen_off,omitempty"`
+	StayAwake     bool   `json:"stay_awake"`
+	AlwaysOnTop   bool   `json:"always_on_top,omitempty"`
+	Fullscreen    bool   `json:"fullscreen,omitempty"`
+	ShowTouches   bool   `json:"show_touches,omitempty"`
+}
+
+// DefaultMirrorConfig returns the default balanced low-latency mirroring configuration.
+func DefaultMirrorConfig() MirrorConfig {
+	return MirrorConfig{
+		FPS:         0,
+		BitrateMbps: 8,
+		MaxSize:     0,
+		Audio:       true,
+		Codec:       "h264",
+		StayAwake:   true,
+	}
+}
+
+// Sanitize clamps numeric bounds and normalizes codec names safely.
+func (m MirrorConfig) Sanitize() MirrorConfig {
+	if m.FPS <= 0 {
+		m.FPS = 0
+	} else {
+		if m.FPS < 15 {
+			m.FPS = 15
+		} else if m.FPS > 240 {
+			m.FPS = 240
+		}
+	}
+	if m.BitrateMbps <= 0 {
+		m.BitrateMbps = 8
+	} else if m.BitrateMbps > 50 {
+		m.BitrateMbps = 50
+	}
+	if m.MaxSize <= 0 {
+		m.MaxSize = 0
+	} else if m.MaxSize < 480 {
+		m.MaxSize = 480
+	} else if m.MaxSize > 4096 {
+		m.MaxSize = 4096
+	}
+	if m.Codec == "h265" || m.Codec == "hevc" {
+		m.Codec = "h265"
+	} else {
+		m.Codec = "h264"
+	}
+	return m
+}
 
 // RemoteFileEntry describes a file in ~/Downloads/PhoneDrop for shared browsing.
 type RemoteFileEntry struct {
@@ -360,6 +418,7 @@ type ControlMessage struct {
 	LinkType string            `json:"link_type,omitempty"` // "usb_cable" | "wireless_adb" | "wifi_lan"
 	Width    int               `json:"width,omitempty"`
 	Height   int               `json:"height,omitempty"`
+	Mirror   *MirrorConfig     `json:"mirror,omitempty"`
 }
 
 // Encode serializes ControlMessage into UTF-8 JSON bytes.

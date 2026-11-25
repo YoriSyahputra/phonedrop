@@ -26,6 +26,7 @@ extern void goOnTogglePhoneMirror(int active);
 extern void goOnToggleLinuxStream(int active);
 extern void goOnOpenFolderClicked();
 extern void goOnRefreshFilesClicked();
+extern void goOnConfigureMirrorClicked();
 extern void goOnFileActionClicked(int action, char *name);
 extern void goOnQuitRequested();
 
@@ -85,6 +86,7 @@ static struct {
     Rect btn_clip;
     Rect btn_folder;
     Rect btn_refresh;
+    Rect btn_mirror_cfg;
 } g_x11 = {
     .mu = PTHREAD_MUTEX_INITIALIZER,
     .wakeup_fd = {-1, -1},
@@ -270,6 +272,22 @@ static void draw_icon_wifi(cairo_t *cr, double cx, double cy) {
     cairo_restore(cr);
 }
 
+static void draw_icon_sliders(cairo_t *cr, double cx, double cy) {
+    cairo_save(cr);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_width(cr, 1.4);
+    cairo_move_to(cr, cx - 5.5, cy - 3.0);
+    cairo_line_to(cr, cx + 5.5, cy - 3.0);
+    cairo_move_to(cr, cx - 5.5, cy + 3.0);
+    cairo_line_to(cr, cx + 5.5, cy + 3.0);
+    cairo_stroke(cr);
+    cairo_arc(cr, cx - 1.5, cy - 3.0, 2.0, 0, 6.28318);
+    cairo_fill(cr);
+    cairo_arc(cr, cx + 2.0, cy + 3.0, 2.0, 0, 6.28318);
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
 static void draw_icon_check(cairo_t *cr, double cx, double cy) {
     cairo_save(cr);
     cairo_set_source_rgb(cr, 0.369, 0.671, 0.510);
@@ -427,6 +445,7 @@ static void redraw_main_window(void) {
     if (filesCardH < 120) filesCardH = 120;
     g_x11.btn_folder = (Rect){w - pad - 156, filesCardY + 12, 66, 26};
     g_x11.btn_refresh = (Rect){w - pad - 82, filesCardY + 12, 70, 26};
+    g_x11.btn_mirror_cfg = (Rect){w - pad - 80, 16, 80, 26};
 
     Rect bSend = g_x11.btn_send;
     Rect bPM = g_x11.btn_phone_mirror;
@@ -434,6 +453,7 @@ static void redraw_main_window(void) {
     Rect bClip = g_x11.btn_clip;
     Rect bFolder = g_x11.btn_folder;
     Rect bRefresh = g_x11.btn_refresh;
+    Rect bMirrorCfg = g_x11.btn_mirror_cfg;
 
     int listTop = filesCardY + 46;
     int listH = filesCardH - 54;
@@ -484,14 +504,31 @@ static void redraw_main_window(void) {
     cairo_move_to(cr, pad + 38, 35);
     cairo_show_text(cr, "PhoneDrop");
 
-    // Smart Connection Pill right (Kabel USB / Wireless / Siaga)
-    cairo_set_font_size(cr, 11.5);
+    // Setelan Mirror Button right of top bar
+    draw_rounded_rect(cr, bMirrorCfg.x, bMirrorCfg.y, bMirrorCfg.w, bMirrorCfg.h, 13.0);
+    cairo_set_source_rgba(cr, 0.13, 0.145, 0.135, 0.95);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, 0.83, 0.72, 0.54, 0.35);
+    cairo_set_line_width(cr, 1.0);
+    cairo_stroke(cr);
+    cairo_set_source_rgb(cr, 0.875, 0.769, 0.608);
+    draw_icon_sliders(cr, bMirrorCfg.x + 15.0, bMirrorCfg.y + bMirrorCfg.h / 2.0);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 11.0);
+    cairo_move_to(cr, bMirrorCfg.x + 26.0, bMirrorCfg.y + 17.0);
+    cairo_show_text(cr, "Setelan");
+
+    // Smart Connection Pill (Kabel USB / Wireless / Siaga) left of Setelan
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 11.0);
     cairo_text_extents_t sext;
     cairo_text_extents(cr, conn, &sext);
     double iconW = (connected && link_type != LINK_NONE) ? 16.0 : 0.0;
-    double pillW = sext.width + iconW + 24.0;
-    if (pillW > w - 180) pillW = w - 180;
-    double pillX = w - pad - pillW;
+    double pillW = sext.width + iconW + 22.0;
+    double maxPillW = (double)(w - 260);
+    if (maxPillW < 80.0) maxPillW = 80.0;
+    if (pillW > maxPillW) pillW = maxPillW;
+    double pillX = (double)bMirrorCfg.x - 8.0 - pillW;
     draw_rounded_rect(cr, pillX, 16, pillW, 26, 13.0);
     if (connected) {
         cairo_set_source_rgba(cr, 0.16, 0.34, 0.25, 0.85);
@@ -900,9 +937,12 @@ static void pd_init_and_run(void) {
                     Rect bClip = g_x11.btn_clip;
                     Rect bFolder = g_x11.btn_folder;
                     Rect bRefresh = g_x11.btn_refresh;
+                    Rect bMirrorCfg = g_x11.btn_mirror_cfg;
                     pthread_mutex_unlock(&g_x11.mu);
 
-                    if (point_in_rect(cx, cy, bSend)) {
+                    if (point_in_rect(cx, cy, bMirrorCfg)) {
+                        goOnConfigureMirrorClicked();
+                    } else if (point_in_rect(cx, cy, bSend)) {
                         goOnSendFileClicked();
                     } else if (point_in_rect(cx, cy, bClip)) {
                         goOnSyncClipClicked();
@@ -998,6 +1038,7 @@ type Callbacks struct {
 	OnDeleteSharedFile  func(name string)
 	OnOpenFolder        func()
 	OnRefreshFiles      func()
+	OnConfigureMirror   func()
 	OnQuit              func()
 }
 
@@ -1072,6 +1113,16 @@ func goOnOpenFolderClicked() {
 func goOnRefreshFilesClicked() {
 	cbMu.RLock()
 	fn := activeCBs.OnRefreshFiles
+	cbMu.RUnlock()
+	if fn != nil {
+		go fn()
+	}
+}
+
+//export goOnConfigureMirrorClicked
+func goOnConfigureMirrorClicked() {
+	cbMu.RLock()
+	fn := activeCBs.OnConfigureMirror
 	cbMu.RUnlock()
 	if fn != nil {
 		go fn()

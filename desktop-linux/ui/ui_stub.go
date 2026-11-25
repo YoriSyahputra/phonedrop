@@ -23,6 +23,7 @@ type Callbacks struct {
 	OnDeleteSharedFile  func(name string)
 	OnOpenFolder        func()
 	OnRefreshFiles      func()
+	OnConfigureMirror   func()
 	OnQuit              func()
 }
 

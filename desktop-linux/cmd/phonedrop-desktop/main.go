@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -84,6 +85,77 @@ func (s *originStore) Delete(name string) {
 	}
 }
 
+type mirrorConfigStore struct {
+	mu   sync.RWMutex
+	path string
+	cfg  protocol.MirrorConfig
+}
+
+func newMirrorConfigStore(path string) *mirrorConfigStore {
+	s := &mirrorConfigStore{
+		path: path,
+		cfg:  protocol.DefaultMirrorConfig(),
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		var loaded protocol.MirrorConfig
+		if json.Unmarshal(data, &loaded) == nil {
+			s.cfg = loaded.Sanitize()
+		}
+	}
+	return s
+}
+
+func (s *mirrorConfigStore) Get() protocol.MirrorConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg
+}
+
+func (s *mirrorConfigStore) Set(cfg protocol.MirrorConfig) protocol.MirrorConfig {
+	clean := cfg.Sanitize()
+	s.mu.Lock()
+	s.cfg = clean
+	data, err := json.MarshalIndent(clean, "", "  ")
+	s.mu.Unlock()
+	if err == nil && s.path != "" {
+		_ = os.MkdirAll(filepath.Dir(s.path), 0o755)
+		_ = os.WriteFile(s.path, data, 0o644)
+	}
+	return clean
+}
+
+func prioritizeCombo(current string, choices []string) string {
+	out := make([]string, 0, len(choices)+1)
+	seen := make(map[string]bool, len(choices)+1)
+	if current != "" {
+		out = append(out, current)
+		seen[current] = true
+	}
+	for _, c := range choices {
+		if !seen[c] {
+			out = append(out, c)
+			seen[c] = true
+		}
+	}
+	return strings.Join(out, "|")
+}
+
+func formatMirrorSummary(c protocol.MirrorConfig) string {
+	fps := "Auto Hz"
+	if c.FPS > 0 {
+		fps = fmt.Sprintf("%d FPS", c.FPS)
+	}
+	res := "Asli"
+	if c.MaxSize > 0 {
+		res = fmt.Sprintf("%dp", c.MaxSize)
+	}
+	aud := "Audio ON"
+	if !c.Audio {
+		aud = "No Audio"
+	}
+	return fmt.Sprintf("%s • %d Mbps • %s • %s • %s", fps, c.BitrateMbps, res, aud, strings.ToUpper(c.Codec))
+}
+
 func main() {
 	debug.SetMemoryLimit(28 << 20)
 	port := flag.Int("port", protocol.DefaultPort, "TCP listen port for PDP2 tunnel")
@@ -103,6 +175,7 @@ func main() {
 		*destDir = filepath.Join(home, "Downloads", "PhoneDrop")
 	}
 	origins := newOriginStore(filepath.Join(home, ".config", "phonedrop", "file-origins.json"))
+	mirrorStore := newMirrorConfigStore(filepath.Join(home, ".config", "phonedrop", "mirror-settings.json"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -330,6 +403,13 @@ func main() {
 			setActivity(fmt.Sprintf("Perangkat tersambung (%s)", s.RemoteAddr))
 			go func() {
 				syncSharedFiles(s)
+				curCfg := mirrorStore.Get()
+				if b, err := (protocol.ControlMessage{
+					Op:     protocol.ControlOpUpdateMirrorConfig,
+					Mirror: &curCfg,
+				}).Encode(); err == nil {
+					_ = s.WriteFrame(protocol.PacketTypeControl, protocol.FlagDirLinuxToPhone, b)
+				}
 				if cur := clipMgr.Current(); cur != "" {
 					if b, err := clipboard.BuildClipPacket(cur); err == nil {
 						_ = s.WriteFrame(protocol.PacketTypeClip, protocol.FlagDirLinuxToPhone, b)
@@ -399,7 +479,30 @@ func main() {
 				}
 				origins.Delete(safe)
 				syncSharedFiles(nil)
+			case protocol.ControlOpUpdateMirrorConfig:
+				if msg.Mirror != nil {
+					cleanCfg := mirrorStore.Set(*msg.Mirror)
+					desktopCap.ApplyMirrorConfig(cleanCfg)
+					scrcpyMgr.SetConfig(cleanCfg)
+					if desktopCap.IsRunning() {
+						desktopCap.Stop()
+						_ = desktopCap.Start(ctx)
+						tunnel.ReplayCodecConfig(s)
+					}
+					if scrcpyMgr.IsRunning() {
+						uiMu.Lock()
+						ser := adbSerial
+						uiMu.Unlock()
+						go func() { _ = scrcpyMgr.RestartIfRunning(ser, cleanCfg) }()
+					}
+					setActivity("Setelan Mirror: " + formatMirrorSummary(cleanCfg))
+				}
 			case protocol.ControlOpStartDesktopStream, protocol.ControlOpRequestKeyframe:
+				if msg.Mirror != nil {
+					cleanCfg := mirrorStore.Set(*msg.Mirror)
+					desktopCap.ApplyMirrorConfig(cleanCfg)
+					scrcpyMgr.SetConfig(cleanCfg)
+				}
 				_ = desktopCap.Start(ctx)
 				tunnel.ReplayCodecConfig(s)
 				uiMu.Lock()
@@ -408,7 +511,7 @@ func main() {
 				if ctrl != nil {
 					ctrl.SetLinuxStreamActive(true)
 				}
-				setActivity("Streaming Layar Laptop -> HP aktif")
+				setActivity("Streaming Layar Laptop -> HP (" + formatMirrorSummary(mirrorStore.Get()) + ")")
 			case protocol.ControlOpStopDesktopStream:
 				desktopCap.Stop()
 				uiMu.Lock()
@@ -419,11 +522,16 @@ func main() {
 				}
 				setActivity("Streaming Layar Laptop dihentikan")
 			case protocol.ControlOpStartPhoneScrcpy:
+				if msg.Mirror != nil {
+					cleanCfg := mirrorStore.Set(*msg.Mirror)
+					desktopCap.ApplyMirrorConfig(cleanCfg)
+					scrcpyMgr.SetConfig(cleanCfg)
+				}
 				uiMu.Lock()
 				ser := adbSerial
 				ctrl := guiCtrl
 				uiMu.Unlock()
-				if err := scrcpyMgr.Start(ser); err != nil {
+				if err := scrcpyMgr.StartWithConfig(ser, mirrorStore.Get()); err != nil {
 					sendControlErr(s, err.Error())
 					setActivity(err.Error())
 					return
@@ -431,7 +539,7 @@ func main() {
 				if ctrl != nil {
 					ctrl.SetPhoneMirrorActive(true)
 				}
-				setActivity("scrcpy Aktif (Kontrol HP dari Laptop)")
+				setActivity("scrcpy Aktif (" + formatMirrorSummary(mirrorStore.Get()) + ")")
 			case protocol.ControlOpStopPhoneScrcpy:
 				scrcpyMgr.Stop()
 				uiMu.Lock()
@@ -453,6 +561,9 @@ func main() {
 	desktopCap = mirror.NewDesktopCapture(mirror.CaptureConfig{}, func(flags uint8, hdr protocol.VideoFrameHeader, nal []byte) {
 		tunnel.BroadcastVideoFrame(flags, hdr, nal)
 	})
+	initMirrorCfg := mirrorStore.Get()
+	desktopCap.ApplyMirrorConfig(initMirrorCfg)
+	scrcpyMgr.SetConfig(initMirrorCfg)
 
 	go func() {
 		if err := tunnel.Serve(ctx); err != nil {
@@ -558,14 +669,15 @@ func main() {
 				c := guiCtrl
 				uiMu.Unlock()
 				if active {
-					if err := scrcpyMgr.Start(ser); err != nil {
+					cfg := mirrorStore.Get()
+					if err := scrcpyMgr.StartWithConfig(ser, cfg); err != nil {
 						setActivity(err.Error())
 						if c != nil {
 							c.SetPhoneMirrorActive(false)
 						}
 						return
 					}
-					setActivity("scrcpy Aktif (Kontrol HP dari Laptop)")
+					setActivity("scrcpy Aktif (" + formatMirrorSummary(cfg) + ")")
 				} else {
 					scrcpyMgr.Stop()
 					setActivity("scrcpy dihentikan")
@@ -573,12 +685,112 @@ func main() {
 			},
 			OnToggleLinuxStream: func(active bool) {
 				if active {
+					cfg := mirrorStore.Get()
+					desktopCap.ApplyMirrorConfig(cfg)
 					_ = desktopCap.Start(ctx)
-					setActivity("Streaming Layar Laptop -> HP aktif")
+					setActivity("Streaming Layar Laptop -> HP (" + formatMirrorSummary(cfg) + ")")
 				} else {
 					desktopCap.Stop()
 					setActivity("Streaming Layar Laptop dihentikan")
 				}
+			},
+			OnConfigureMirror: func() {
+				cur := mirrorStore.Get()
+				curFps := "Auto"
+				if cur.FPS > 0 {
+					curFps = strconv.Itoa(cur.FPS)
+				}
+				curRes := "Asli"
+				if cur.MaxSize > 0 {
+					curRes = strconv.Itoa(cur.MaxSize)
+				}
+				curBr := strconv.Itoa(cur.BitrateMbps)
+				curAud := "Aktif"
+				if !cur.Audio {
+					curAud = "Tanpa Audio"
+				}
+				curCodec := strings.ToLower(cur.Codec)
+				if curCodec != "h265" {
+					curCodec = "h264"
+				}
+				curScreen := "Tetap Nyala"
+				if cur.TurnScreenOff {
+					curScreen = "Matikan Layar HP"
+				}
+
+				out, err := exec.Command(
+					"zenity", "--forms",
+					"--title=Pengaturan Screen Mirroring (PhoneDrop)",
+					"--text=Atur FPS, resolusi, bitrate, audio, codec, dan layar HP:",
+					"--separator=|",
+					"--add-combo=Target FPS", "--combo-values="+prioritizeCombo(curFps, []string{"Auto", "30", "60", "90", "120", "144"}),
+					"--add-combo=Resolusi Maks (px)", "--combo-values="+prioritizeCombo(curRes, []string{"Asli", "1920", "1280", "1024", "720"}),
+					"--add-combo=Bitrate (Mbps)", "--combo-values="+prioritizeCombo(curBr, []string{"8", "4", "12", "16", "24", "2"}),
+					"--add-combo=Audio HP -> Laptop", "--combo-values="+prioritizeCombo(curAud, []string{"Aktif", "Tanpa Audio"}),
+					"--add-combo=Codec Video", "--combo-values="+prioritizeCombo(curCodec, []string{"h264", "h265"}),
+					"--add-combo=Layar HP saat Mirror", "--combo-values="+prioritizeCombo(curScreen, []string{"Tetap Nyala", "Matikan Layar HP"}),
+				).Output()
+				if err != nil {
+					return
+				}
+				parts := strings.Split(strings.TrimRight(string(out), "\r\n"), "|")
+				next := cur
+				if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+					v := strings.TrimSpace(parts[0])
+					if strings.EqualFold(v, "Auto") {
+						next.FPS = 0
+					} else if n, err := strconv.Atoi(v); err == nil {
+						next.FPS = n
+					}
+				}
+				if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+					v := strings.TrimSpace(parts[1])
+					if strings.EqualFold(v, "Asli") {
+						next.MaxSize = 0
+					} else if n, err := strconv.Atoi(v); err == nil {
+						next.MaxSize = n
+					}
+				}
+				if len(parts) > 2 && strings.TrimSpace(parts[2]) != "" {
+					if n, err := strconv.Atoi(strings.TrimSpace(parts[2])); err == nil {
+						next.BitrateMbps = n
+					}
+				}
+				if len(parts) > 3 && strings.TrimSpace(parts[3]) != "" {
+					next.Audio = strings.TrimSpace(parts[3]) != "Tanpa Audio"
+				}
+				if len(parts) > 4 && strings.TrimSpace(parts[4]) != "" {
+					next.Codec = strings.ToLower(strings.TrimSpace(parts[4]))
+				}
+				if len(parts) > 5 && strings.TrimSpace(parts[5]) != "" {
+					next.TurnScreenOff = strings.TrimSpace(parts[5]) == "Matikan Layar HP"
+				}
+
+				saved := mirrorStore.Set(next)
+				desktopCap.ApplyMirrorConfig(saved)
+				scrcpyMgr.SetConfig(saved)
+				if b, err := (protocol.ControlMessage{
+					Op:     protocol.ControlOpUpdateMirrorConfig,
+					Mirror: &saved,
+				}).Encode(); err == nil && tunnel != nil {
+					tunnel.BroadcastFrame(protocol.PacketTypeControl, protocol.FlagDirLinuxToPhone, b)
+				}
+				if desktopCap.IsRunning() {
+					desktopCap.Stop()
+					_ = desktopCap.Start(ctx)
+					if tunnel != nil {
+						if p := tunnel.PrimarySession(); p != nil {
+							tunnel.ReplayCodecConfig(p)
+						}
+					}
+				}
+				if scrcpyMgr.IsRunning() {
+					uiMu.Lock()
+					ser := adbSerial
+					uiMu.Unlock()
+					_ = scrcpyMgr.RestartIfRunning(ser, saved)
+				}
+				setActivity("Setelan Mirror disimpan: " + formatMirrorSummary(saved))
 			},
 			OnQuit: func() {
 				cancel()

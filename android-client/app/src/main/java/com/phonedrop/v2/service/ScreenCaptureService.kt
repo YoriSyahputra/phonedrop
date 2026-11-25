@@ -93,18 +93,23 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
+        val cfg = sessionHolder.mirrorConfig.value
         val metrics = resources.displayMetrics
-        val targetW = 720
-        val scale = targetW.toFloat() / metrics.widthPixels.coerceAtLeast(1)
-        val targetH = (metrics.heightPixels * scale).roundToInt().coerceAtLeast(720)
-        val maxHz = DisplayRefreshRateHelper.getMaxSupportedRefreshRate(this).roundToInt().coerceIn(60, 240)
+        val longEdge = maxOf(metrics.widthPixels, metrics.heightPixels).coerceAtLeast(1)
+        val targetMaxEdge = if (cfg.maxSize > 0) cfg.maxSize.coerceAtLeast(480) else minOf(longEdge, 1920)
+        val scale = (targetMaxEdge.toFloat() / longEdge).coerceAtMost(1f)
+        val targetW = ((metrics.widthPixels * scale).roundToInt() and 1.inv()).coerceAtLeast(480)
+        val targetH = ((metrics.heightPixels * scale).roundToInt() and 1.inv()).coerceAtLeast(640)
+        val targetFps = if (cfg.fps > 0) cfg.fps.coerceIn(15, 240)
+        else DisplayRefreshRateHelper.getMaxSupportedRefreshRate(this).roundToInt().coerceIn(60, 240)
+        val bitrateBps = (cfg.bitrateMbps * 1_000_000).coerceIn(2_000_000, 24_000_000)
 
         encoder?.stop()
         encoder = ScreenCaptureEncoder(sessionHolder, scope) {
             stopCleanly()
         }.also {
             sessionHolder.setMirrorMode(MirrorMode.SENDING_PHONE_SCREEN)
-            it.start(projection, targetW, targetH, metrics.densityDpi, maxHz)
+            it.start(projection, targetW, targetH, metrics.densityDpi, targetFps, bitrateBps)
         }
 
         return START_NOT_STICKY

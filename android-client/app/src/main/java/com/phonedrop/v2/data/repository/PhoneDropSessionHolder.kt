@@ -11,6 +11,7 @@ import com.phonedrop.v2.data.protocol.FileChunkPayload
 import com.phonedrop.v2.data.protocol.FileDonePayload
 import com.phonedrop.v2.data.protocol.FileInitPayload
 import com.phonedrop.v2.data.protocol.InputEventPayload
+import com.phonedrop.v2.data.protocol.MirrorConfig
 import com.phonedrop.v2.data.protocol.ProtocolConstants
 import com.phonedrop.v2.data.protocol.RemoteFileEntry
 import com.phonedrop.v2.data.protocol.VideoFrameHeader
@@ -62,6 +63,9 @@ class PhoneDropSessionHolder private constructor(
 
     private val _linkType = MutableStateFlow("")
     val linkType: StateFlow<String> = _linkType.asStateFlow()
+
+    private val _mirrorConfig = MutableStateFlow(loadMirrorConfig(appContext))
+    val mirrorConfig: StateFlow<MirrorConfig> = _mirrorConfig.asStateFlow()
 
     private val _statusToast = MutableStateFlow<String?>(null)
     val statusToast: StateFlow<String?> = _statusToast.asStateFlow()
@@ -151,6 +155,11 @@ class PhoneDropSessionHolder private constructor(
         when (ctrl.op) {
             ControlOps.FILE_LIST -> _remoteFiles.value = ctrl.files
             ControlOps.CONN_INFO -> if (ctrl.linkType.isNotBlank()) _linkType.value = ctrl.linkType
+            ControlOps.UPDATE_MIRROR_CONFIG -> ctrl.mirror?.let { cfg ->
+                val clean = cfg.sanitize()
+                saveMirrorConfig(appContext, clean)
+                _mirrorConfig.value = clean
+            }
             ControlOps.ERROR -> if (ctrl.message.isNotBlank()) _statusToast.value = ctrl.message
         }
     }
@@ -210,8 +219,21 @@ class PhoneDropSessionHolder private constructor(
         sendControl(ControlMessage(op = ControlOps.DELETE_FILE, name = name))
     }
 
+    fun updateMirrorConfig(cfg: MirrorConfig, applyLive: Boolean = true) {
+        val clean = cfg.sanitize()
+        saveMirrorConfig(appContext, clean)
+        _mirrorConfig.value = clean
+        if (applyLive) {
+            scope.launch {
+                runCatching {
+                    sendControl(ControlMessage(op = ControlOps.UPDATE_MIRROR_CONFIG, mirror = clean))
+                }
+            }
+        }
+    }
+
     suspend fun requestStartDesktopStream() {
-        sendControl(ControlMessage(op = ControlOps.START_DESKTOP_STREAM))
+        sendControl(ControlMessage(op = ControlOps.START_DESKTOP_STREAM, mirror = _mirrorConfig.value))
     }
 
     suspend fun requestStopDesktopStream() {
@@ -219,11 +241,24 @@ class PhoneDropSessionHolder private constructor(
     }
 
     suspend fun requestLaunchScrcpy() {
-        sendControl(ControlMessage(op = ControlOps.START_PHONE_SCRCPY))
+        sendControl(ControlMessage(op = ControlOps.START_PHONE_SCRCPY, mirror = _mirrorConfig.value))
     }
 
     suspend fun requestStopScrcpy() {
         sendControl(ControlMessage(op = ControlOps.STOP_PHONE_SCRCPY))
+    }
+
+    private fun loadMirrorConfig(context: Context): MirrorConfig {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_MIRROR_CONFIG, null) ?: return MirrorConfig()
+        return runCatching { MirrorConfig.fromJsonString(raw) }.getOrDefault(MirrorConfig())
+    }
+
+    private fun saveMirrorConfig(context: Context, cfg: MirrorConfig) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_MIRROR_CONFIG, cfg.toJsonString())
+            .apply()
     }
 
     suspend fun refreshLocalFiles() {
@@ -245,6 +280,9 @@ class PhoneDropSessionHolder private constructor(
     }
 
     companion object {
+        private const val PREFS_NAME = "phonedrop_mirror_prefs"
+        private const val KEY_MIRROR_CONFIG = "mirror_config_json"
+
         @Volatile
         private var instance: PhoneDropSessionHolder? = null
 

@@ -23,6 +23,7 @@ type CaptureConfig struct {
 	OutWidth    int // encoded output stream width (default 1280)
 	OutHeight   int // encoded output stream height (default 720)
 	FPS         int
+	BitrateKbps int
 	PreferVAAPI bool
 }
 
@@ -66,9 +67,65 @@ func NewDesktopCapture(cfg CaptureConfig, sink FrameSink) *DesktopCapture {
 	cfg.OutWidth &^= 1
 	cfg.OutHeight &^= 1
 	if cfg.FPS <= 0 {
-		cfg.FPS = 24
+		cfg.FPS = 30
+	}
+	if cfg.BitrateKbps <= 0 {
+		cfg.BitrateKbps = 4000
 	}
 	return &DesktopCapture{cfg: cfg, sink: sink}
+}
+
+// ApplyMirrorConfig updates Linux->Phone desktop capture FPS, bitrate, and output dimensions.
+func (d *DesktopCapture) ApplyMirrorConfig(mc protocol.MirrorConfig) {
+	mc = mc.Sanitize()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if mc.FPS > 0 {
+		fps := mc.FPS
+		if fps < 15 {
+			fps = 15
+		} else if fps > 60 {
+			fps = 60
+		}
+		d.cfg.FPS = fps
+	} else {
+		d.cfg.FPS = 30
+	}
+
+	kbps := mc.BitrateMbps * 1000
+	if kbps < 1500 {
+		kbps = 1500
+	} else if kbps > 16000 {
+		kbps = 16000
+	}
+	d.cfg.BitrateKbps = kbps
+
+	srcW := d.cfg.Width
+	srcH := d.cfg.Height
+	if srcW <= 0 || srcH <= 0 {
+		srcW, srcH = 1280, 720
+	}
+	if mc.MaxSize > 0 && (srcW > mc.MaxSize || srcH > mc.MaxSize) {
+		if srcW >= srcH {
+			d.cfg.OutWidth = mc.MaxSize
+			d.cfg.OutHeight = (srcH * mc.MaxSize / srcW)
+		} else {
+			d.cfg.OutHeight = mc.MaxSize
+			d.cfg.OutWidth = (srcW * mc.MaxSize / srcH)
+		}
+	} else {
+		d.cfg.OutWidth = srcW
+		d.cfg.OutHeight = srcH
+	}
+	d.cfg.OutWidth = (d.cfg.OutWidth &^ 1)
+	d.cfg.OutHeight = (d.cfg.OutHeight &^ 1)
+	if d.cfg.OutWidth < 320 {
+		d.cfg.OutWidth = 320
+	}
+	if d.cfg.OutHeight < 240 {
+		d.cfg.OutHeight = 240
+	}
 }
 
 // ScreenSize returns the real X11 desktop width and height for accurate InputInjector mapping.
@@ -126,18 +183,39 @@ func (d *DesktopCapture) Stop() {
 }
 
 func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
-	inSize := fmt.Sprintf("%dx%d", d.cfg.Width, d.cfg.Height)
-	vf := fmt.Sprintf("scale=%d:%d,format=yuv420p", d.cfg.OutWidth, d.cfg.OutHeight)
-	fpsArg := strconv.Itoa(d.cfg.FPS)
-	x264Params := fmt.Sprintf("repeat-headers=1:sliced-threads=0:slices=1:annexb=1:keyint=%d:min-keyint=%d:bframes=0", d.cfg.FPS, d.cfg.FPS/2)
+	d.mu.Lock()
+	srcW, srcH := d.cfg.Width, d.cfg.Height
+	outW, outH := d.cfg.OutWidth, d.cfg.OutHeight
+	fpsVal := d.cfg.FPS
+	kbps := d.cfg.BitrateKbps
+	display := d.cfg.Display
+	d.mu.Unlock()
+	if fpsVal <= 0 {
+		fpsVal = 30
+	}
+	if kbps <= 0 {
+		kbps = 4000
+	}
+
+	inSize := fmt.Sprintf("%dx%d", srcW, srcH)
+	vf := fmt.Sprintf("scale=%d:%d,format=yuv420p", outW, outH)
+	fpsArg := strconv.Itoa(fpsVal)
+	minKey := fpsVal / 2
+	if minKey < 5 {
+		minKey = 5
+	}
+	x264Params := fmt.Sprintf("repeat-headers=1:sliced-threads=0:slices=1:annexb=1:keyint=%d:min-keyint=%d:bframes=0", fpsVal, minKey)
+	bv := fmt.Sprintf("%dk", kbps)
+	maxRate := fmt.Sprintf("%dk", kbps+kbps/4)
+	bufSize := fmt.Sprintf("%dk", kbps/2)
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
-		"-f", "x11grab", "-framerate", fpsArg, "-video_size", inSize, "-i", d.cfg.Display,
+		"-f", "x11grab", "-framerate", fpsArg, "-video_size", inSize, "-i", display,
 		"-vf", vf,
 		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-		"-profile:v", "baseline", "-level", "3.1",
-		"-b:v", "2200k", "-maxrate", "2500k", "-bufsize", "1200k",
+		"-profile:v", "baseline", "-level", "4.2",
+		"-b:v", bv, "-maxrate", maxRate, "-bufsize", bufSize,
 		"-x264-params", x264Params,
 		"-f", "h264", "pipe:1",
 	}
@@ -174,8 +252,8 @@ func (d *DesktopCapture) runFFmpeg(ctx context.Context) {
 		hdr := protocol.VideoFrameHeader{
 			StreamID: protocol.StreamLinuxToPhone,
 			Codec:    protocol.CodecH264,
-			Width:    uint16(d.cfg.OutWidth),
-			Height:   uint16(d.cfg.OutHeight),
+			Width:    uint16(outW),
+			Height:   uint16(outH),
 			PtsUs:    ptsUs,
 		}
 

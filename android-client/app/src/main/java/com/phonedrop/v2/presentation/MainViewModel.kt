@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.phonedrop.v2.data.mirror.DecoderStatus
 import com.phonedrop.v2.data.protocol.InputEventPayload
+import com.phonedrop.v2.data.protocol.MirrorConfig
 import com.phonedrop.v2.data.protocol.RemoteFileEntry
 import com.phonedrop.v2.data.repository.PhoneDropSessionHolder
 import com.phonedrop.v2.domain.model.ConnectionState
@@ -42,6 +43,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val remoteFiles: StateFlow<List<RemoteFileEntry>> = sessionHolder.remoteFiles
     val localFiles: StateFlow<List<LocalReceivedFile>> = sessionHolder.localFiles
     val linkType: StateFlow<String> = sessionHolder.linkType
+    val mirrorConfig: StateFlow<MirrorConfig> = sessionHolder.mirrorConfig
     val statusToast: StateFlow<String?> = sessionHolder.statusToast
 
     private val _decoderStatus = MutableStateFlow<DecoderStatus>(DecoderStatus.Idle)
@@ -136,6 +138,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { sessionHolder.requestLaunchScrcpy() }
         }
+    }
+
+    fun updateMirrorConfig(cfg: MirrorConfig) {
+        sessionHolder.updateMirrorConfig(cfg, applyLive = true)
     }
 
     fun setMirrorMode(mode: MirrorMode) {

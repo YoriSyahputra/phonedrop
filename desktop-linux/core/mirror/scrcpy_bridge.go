@@ -55,18 +55,74 @@ func DetectPhoneMaxRefreshRate(serial string) int {
 	return ParseDisplayMaxRefreshRate(string(out))
 }
 
+// BuildScrcpyArgs constructs the scrcpy CLI arguments for the given device, user settings, and detected Hz.
+func BuildScrcpyArgs(target string, cfg protocol.MirrorConfig, detectedPhoneHz int) []string {
+	cfg = cfg.Sanitize()
+	args := []string{
+		"-s", target,
+		"--window-title=PhoneDrop — Layar HP",
+		fmt.Sprintf("--video-bit-rate=%dM", cfg.BitrateMbps),
+	}
+	if cfg.FPS > 0 {
+		args = append(args, fmt.Sprintf("--max-fps=%d", cfg.FPS))
+	} else if detectedPhoneHz > 0 {
+		args = append(args, fmt.Sprintf("--max-fps=%d", detectedPhoneHz))
+	}
+	if cfg.MaxSize > 0 {
+		args = append(args, fmt.Sprintf("--max-size=%d", cfg.MaxSize))
+	}
+	if !cfg.Audio {
+		args = append(args, "--no-audio")
+	} else {
+		args = append(args, "--audio-codec=opus")
+	}
+	if cfg.Codec == "h265" {
+		args = append(args, "--video-codec=h265")
+	} else {
+		args = append(args, "--video-codec=h264")
+	}
+	if cfg.StayAwake || cfg.TurnScreenOff {
+		args = append(args, "--stay-awake")
+	}
+	if cfg.TurnScreenOff {
+		args = append(args, "--turn-screen-off")
+	}
+	if cfg.AlwaysOnTop {
+		args = append(args, "--always-on-top")
+	}
+	if cfg.Fullscreen {
+		args = append(args, "--fullscreen")
+	}
+	if cfg.ShowTouches {
+		args = append(args, "--show-touches")
+	}
+	return args
+}
+
 // ScrcpyManager launches and manages a standalone interactive scrcpy window
 // providing high-refresh-rate Phone -> Linux screen mirroring with native mouse/keyboard control.
 type ScrcpyManager struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
+	done    chan struct{}
+	cfg     protocol.MirrorConfig
 	running atomic.Bool
 	onExit  func()
 }
 
-// NewScrcpyManager constructs a ScrcpyManager.
+// NewScrcpyManager constructs a ScrcpyManager with default mirror settings.
 func NewScrcpyManager(onExit func()) *ScrcpyManager {
-	return &ScrcpyManager{onExit: onExit}
+	return &ScrcpyManager{
+		cfg:    protocol.DefaultMirrorConfig(),
+		onExit: onExit,
+	}
+}
+
+// SetConfig stores sanitized mirror settings for future scrcpy launches.
+func (m *ScrcpyManager) SetConfig(cfg protocol.MirrorConfig) {
+	m.mu.Lock()
+	m.cfg = cfg.Sanitize()
+	m.mu.Unlock()
 }
 
 // IsRunning reports whether a managed scrcpy session is active.
@@ -97,13 +153,23 @@ func ResolveActiveADBSerial(preferred string) string {
 	return ""
 }
 
-// Start launches scrcpy targeting serial (or auto-discovered ADB device).
+// Start launches scrcpy targeting serial using the currently stored MirrorConfig.
 func (m *ScrcpyManager) Start(serial string) error {
+	m.mu.Lock()
+	cfg := m.cfg
+	m.mu.Unlock()
+	return m.StartWithConfig(serial, cfg)
+}
+
+// StartWithConfig stores cfg and launches scrcpy targeting serial (or auto-discovered ADB device).
+func (m *ScrcpyManager) StartWithConfig(serial string, cfg protocol.MirrorConfig) error {
 	if _, err := exec.LookPath("scrcpy"); err != nil {
 		return errors.New("scrcpy tidak ditemukan di sistem (/usr/bin/scrcpy)")
 	}
 
+	cfg = cfg.Sanitize()
 	m.mu.Lock()
+	m.cfg = cfg
 	if m.running.Load() {
 		m.mu.Unlock()
 		return nil
@@ -115,49 +181,88 @@ func (m *ScrcpyManager) Start(serial string) error {
 		return errors.New("tidak ada HP ADB yang terhubung (cek USB / Wireless Debugging)")
 	}
 
-	maxHz := DetectPhoneMaxRefreshRate(target)
-	args := []string{
-		"-s", target,
-		"--window-title=PhoneDrop — Layar HP",
-		"--stay-awake",
-		"--video-bit-rate=8M",
+	detectedHz := 0
+	if cfg.FPS <= 0 {
+		detectedHz = DetectPhoneMaxRefreshRate(target)
 	}
-	if maxHz > 0 {
-		args = append(args, fmt.Sprintf("--max-fps=%d", maxHz))
-	}
+	args := BuildScrcpyArgs(target, cfg, detectedHz)
 	cmd := exec.Command("scrcpy", args...)
 	if err := cmd.Start(); err != nil {
 		m.mu.Unlock()
 		return fmt.Errorf("gagal menjalankan scrcpy: %w", err)
 	}
 
+	done := make(chan struct{})
 	m.cmd = cmd
+	m.done = done
 	m.running.Store(true)
 	cb := m.onExit
 	m.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		_ = cmd.Wait()
-		m.running.Store(false)
+		shouldNotify := false
 		m.mu.Lock()
 		if m.cmd == cmd {
 			m.cmd = nil
+			m.done = nil
+			m.running.Store(false)
+			shouldNotify = true
 		}
 		m.mu.Unlock()
-		if cb != nil {
+		if shouldNotify && cb != nil {
 			cb()
 		}
 	}()
 	return nil
 }
 
+// RestartIfRunning updates stored settings and restarts scrcpy cleanly if currently active.
+func (m *ScrcpyManager) RestartIfRunning(serial string, cfg protocol.MirrorConfig) error {
+	cfg = cfg.Sanitize()
+	m.mu.Lock()
+	m.cfg = cfg
+	wasRunning := m.running.Load()
+	cmd := m.cmd
+	done := m.done
+	if wasRunning && cmd != nil {
+		// Prevent old cmd exit from clearing UI active badge during restart.
+		m.cmd = nil
+		m.done = nil
+		m.running.Store(false)
+	}
+	m.mu.Unlock()
+
+	if !wasRunning {
+		return nil
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+	return m.StartWithConfig(serial, cfg)
+}
+
 // Stop terminates the running scrcpy window cleanly.
 func (m *ScrcpyManager) Stop() {
 	m.mu.Lock()
 	cmd := m.cmd
+	done := m.done
 	m.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(1500 * time.Millisecond):
+		}
 	}
 }
 
