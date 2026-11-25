@@ -9,6 +9,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +65,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.phonedrop.v2.data.mirror.DecoderStatus
 import com.phonedrop.v2.data.protocol.InputConstants
 import com.phonedrop.v2.data.protocol.InputEventPayload
+import com.phonedrop.v2.data.protocol.MirrorConfig
 import com.phonedrop.v2.data.protocol.RemoteFileEntry
 import com.phonedrop.v2.domain.model.ConnectionState
 import com.phonedrop.v2.domain.model.LocalReceivedFile
@@ -102,6 +104,7 @@ fun PhoneDropScreen(
 ) {
     val connState by viewModel.connectionState.collectAsState()
     val linkType by viewModel.linkType.collectAsState()
+    val mirrorConfig by viewModel.mirrorConfig.collectAsState()
     val transfers by viewModel.transferList.collectAsState()
     val latestClip by viewModel.latestClipboard.collectAsState()
     val mirrorMode by viewModel.mirrorMode.collectAsState()
@@ -114,6 +117,7 @@ fun PhoneDropScreen(
     var showConnDialog by remember { mutableStateOf(false) }
     var hostInput by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    val backdropState = rememberLiquidGlassBackdropState()
 
     LaunchedEffect(toastMsg) {
         val msg = toastMsg
@@ -125,10 +129,10 @@ fun PhoneDropScreen(
 
     val navItems = remember {
         listOf(
-            GlassNavItem("File") { c -> NavIconFile(c) },
-            GlassNavItem("Clipboard") { c -> NavIconClipboard(c) },
-            GlassNavItem("Remote") { c -> NavIconRemote(c) },
-            GlassNavItem("Layar") { c -> NavIconScreen(c) }
+            GlassNavItem("File") { c, filled -> NavIconFile(c, filled) },
+            GlassNavItem("Clipboard") { c, filled -> NavIconClipboard(c, filled) },
+            GlassNavItem("Remote") { c, filled -> NavIconRemote(c, filled) },
+            GlassNavItem("Layar") { c, filled -> NavIconScreen(c, filled) }
         )
     }
 
@@ -137,7 +141,7 @@ fun PhoneDropScreen(
         snackbarHost = {
             SnackbarHost(
                 hostState = snackbarHostState,
-                modifier = Modifier.padding(bottom = 86.dp)
+                modifier = Modifier.padding(bottom = 100.dp)
             )
         },
         topBar = {
@@ -156,7 +160,8 @@ fun PhoneDropScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                    .padding(start = 14.dp, end = 14.dp, top = 10.dp)
+                    .liquidGlassBackdropSource(backdropState)
             ) {
                 when (selectedTab) {
                     0 -> FilesTab(
@@ -188,7 +193,9 @@ fun PhoneDropScreen(
                     )
                     3 -> ScreenMirrorTab(
                         mirrorMode = mirrorMode,
+                        mirrorConfig = mirrorConfig,
                         decoderStatus = decoderStatus,
+                        onUpdateMirrorConfig = { viewModel.updateMirrorConfig(it) },
                         onStartDesktopView = { viewModel.startDesktopViewing() },
                         onStopDesktopView = { viewModel.stopDesktopViewing() },
                         onLaunchPhoneScrcpy = { viewModel.launchPhoneScrcpyOnLaptop() },
@@ -201,11 +208,12 @@ fun PhoneDropScreen(
                 }
             }
 
-            // Floating Apple-style Liquid Glass capsule navbar overlaid so content scrolls visibly beneath it
+            // Protruding iOS 26 Chromatic Liquid Glass capsule navbar over live blurred backdrop
             LiquidGlassNavBar(
                 items = navItems,
                 selectedIndex = selectedTab,
                 onSelect = { selectedTab = it },
+                backdropState = backdropState,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
@@ -957,7 +965,9 @@ private fun RemoteControlTab(
 @Composable
 private fun ScreenMirrorTab(
     mirrorMode: MirrorMode,
+    mirrorConfig: MirrorConfig,
     decoderStatus: DecoderStatus,
+    onUpdateMirrorConfig: (MirrorConfig) -> Unit,
     onStartDesktopView: () -> Unit,
     onStopDesktopView: () -> Unit,
     onLaunchPhoneScrcpy: () -> Unit,
@@ -969,6 +979,7 @@ private fun ScreenMirrorTab(
 ) {
     var boxSize by remember { mutableStateOf(IntSize(1, 1)) }
     var quickText by remember { mutableStateOf("") }
+    var showMirrorSettings by remember { mutableStateOf(true) }
     val viewingDesktop = mirrorMode == MirrorMode.RECEIVING_LINUX_DESKTOP
 
     Column(
@@ -976,7 +987,7 @@ private fun ScreenMirrorTab(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(bottom = 104.dp)
+            .padding(bottom = 112.dp)
     ) {
         Card(
             colors = CardDefaults.cardColors(containerColor = CardSurface),
@@ -1030,6 +1041,163 @@ private fun ScreenMirrorTab(
                     color = if (decoderStatus is DecoderStatus.Live) SuccessGreen else TextMuted,
                     fontSize = 12.sp
                 )
+            }
+        }
+
+        // Pengaturan Mirroring (FPS, Audio / No Audio, Resolusi, Bitrate, Codec, Flags)
+        Card(
+            colors = CardDefaults.cardColors(containerColor = CardSurface),
+            border = BorderStroke(1.dp, CardBorder),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            val fpsLabel = if (mirrorConfig.fps <= 0) "Auto Hz" else "${mirrorConfig.fps} FPS"
+            val resLabel = if (mirrorConfig.maxSize <= 0) "Asli" else "${mirrorConfig.maxSize}p"
+            val audioLabel = if (mirrorConfig.audio) "Audio ON" else "No Audio"
+            val summaryText = "$fpsLabel • ${mirrorConfig.bitrateMbps}M • $resLabel • $audioLabel"
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(12.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showMirrorSettings = !showMirrorSettings }
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        IconSettingsSliders(BrassLight)
+                        Column {
+                            Text("Pengaturan Mirroring", color = TextWarm, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(summaryText, color = BrassLight, fontSize = 11.5.sp)
+                        }
+                    }
+                    if (showMirrorSettings) IconChevronUp(TextMuted) else IconChevronDown(TextMuted)
+                }
+
+                if (showMirrorSettings) {
+                    // 1. Target FPS
+                    SettingGroupLabel("Target FPS")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                    ) {
+                        listOf(0 to "Auto", 30 to "30", 60 to "60", 90 to "90", 120 to "120", 144 to "144").forEach { (fps, lbl) ->
+                            MirrorOptionChip(
+                                label = lbl,
+                                selected = mirrorConfig.fps == fps,
+                                onClick = { onUpdateMirrorConfig(mirrorConfig.copy(fps = fps)) }
+                            )
+                        }
+                    }
+
+                    // 2. Audio (scrcpy)
+                    SettingGroupLabel("Audio (scrcpy)")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(InnerSurface)
+                            .border(1.dp, CardBorder, RoundedCornerShape(999.dp))
+                            .padding(3.dp)
+                    ) {
+                        SegmentedToggleOption(
+                            label = "Ada Audio",
+                            selected = mirrorConfig.audio,
+                            icon = { c -> IconVolumeOn(c) },
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(audio = true)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        SegmentedToggleOption(
+                            label = "No Audio",
+                            selected = !mirrorConfig.audio,
+                            icon = { c -> IconVolumeOff(c) },
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(audio = false)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // 3. Resolusi Maks
+                    SettingGroupLabel("Resolusi Maksimal")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                    ) {
+                        listOf(0 to "Asli", 1920 to "1920p", 1280 to "1280p", 1024 to "1024p", 720 to "720p").forEach { (sz, lbl) ->
+                            MirrorOptionChip(
+                                label = lbl,
+                                selected = mirrorConfig.maxSize == sz,
+                                onClick = { onUpdateMirrorConfig(mirrorConfig.copy(maxSize = sz)) }
+                            )
+                        }
+                    }
+
+                    // 4. Bitrate
+                    SettingGroupLabel("Bitrate Video")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                    ) {
+                        listOf(2, 4, 8, 12, 16, 24).forEach { mb ->
+                            MirrorOptionChip(
+                                label = "${mb} Mbps",
+                                selected = mirrorConfig.bitrateMbps == mb,
+                                onClick = { onUpdateMirrorConfig(mirrorConfig.copy(bitrateMbps = mb)) }
+                            )
+                        }
+                    }
+
+                    // 5. Codec + Opsi Tambahan
+                    SettingGroupLabel("Codec & Perilaku Layar")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                    ) {
+                        MirrorOptionChip(
+                            label = "H.264",
+                            selected = mirrorConfig.codec != "h265",
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(codec = "h264")) }
+                        )
+                        MirrorOptionChip(
+                            label = "H.265 (HEVC)",
+                            selected = mirrorConfig.codec == "h265",
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(codec = "h265")) }
+                        )
+                        MirrorOptionChip(
+                            label = "Matikan Layar HP",
+                            selected = mirrorConfig.turnScreenOff,
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(turnScreenOff = !mirrorConfig.turnScreenOff)) }
+                        )
+                        MirrorOptionChip(
+                            label = "Tetap Menyala",
+                            selected = mirrorConfig.stayAwake,
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(stayAwake = !mirrorConfig.stayAwake)) }
+                        )
+                        MirrorOptionChip(
+                            label = "Fullscreen",
+                            selected = mirrorConfig.fullscreen,
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(fullscreen = !mirrorConfig.fullscreen)) }
+                        )
+                        MirrorOptionChip(
+                            label = "Always on Top",
+                            selected = mirrorConfig.alwaysOnTop,
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(alwaysOnTop = !mirrorConfig.alwaysOnTop)) }
+                        )
+                        MirrorOptionChip(
+                            label = "Titik Sentuh",
+                            selected = mirrorConfig.showTouches,
+                            onClick = { onUpdateMirrorConfig(mirrorConfig.copy(showTouches = !mirrorConfig.showTouches)) }
+                        )
+                    }
+                }
             }
         }
 
@@ -1192,6 +1360,71 @@ private fun SegmentPill(
             color = if (selected) BgDeep else TextMuted,
             fontWeight = FontWeight.Bold,
             fontSize = 12.sp
+        )
+    }
+}
+
+@Composable
+private fun SettingGroupLabel(text: String) {
+    Text(
+        text = text,
+        color = TextMuted,
+        fontSize = 11.5.sp,
+        fontWeight = FontWeight.SemiBold
+    )
+}
+
+@Composable
+private fun MirrorOptionChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) Brass else InnerSurface)
+            .border(1.dp, if (selected) BrassLight else CardBorder, RoundedCornerShape(999.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = label,
+            color = if (selected) BgDeep else TextWarm,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 11.5.sp,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun SegmentedToggleOption(
+    label: String,
+    selected: Boolean,
+    icon: @Composable (Color) -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val contentColor = if (selected) BgDeep else TextMuted
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) Brass else Color.Transparent)
+            .clickable { onClick() }
+            .padding(vertical = 7.dp, horizontal = 8.dp)
+    ) {
+        icon(contentColor)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = label,
+            color = contentColor,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 12.sp,
+            maxLines = 1
         )
     }
 }

@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 
@@ -53,83 +54,163 @@ fun PhoneDropLogoIcon(
 }
 
 @Composable
-fun NavIconFile(color: Color, modifier: Modifier = Modifier.size(20.dp)) {
+fun NavIconFile(
+    color: Color,
+    filled: Boolean = false,
+    modifier: Modifier = Modifier.size(if (filled) 23.dp else 21.dp)
+) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
         val sw = w * 0.095f
         val p = Path().apply {
-            moveTo(w * 0.15f, h * 0.22f)
-            lineTo(w * 0.42f, h * 0.22f)
-            lineTo(w * 0.50f, h * 0.32f)
-            lineTo(w * 0.85f, h * 0.32f)
-            lineTo(w * 0.85f, h * 0.80f)
-            lineTo(w * 0.15f, h * 0.80f)
+            moveTo(w * 0.14f, h * 0.21f)
+            lineTo(w * 0.42f, h * 0.21f)
+            lineTo(w * 0.51f, h * 0.32f)
+            lineTo(w * 0.86f, h * 0.32f)
+            lineTo(w * 0.86f, h * 0.80f)
+            lineTo(w * 0.14f, h * 0.80f)
             close()
         }
-        drawPath(p, color = color, style = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        if (filled) {
+            drawPath(p, color = color, style = Fill)
+            drawLine(
+                color = Color(0xFF282C2E),
+                start = Offset(w * 0.28f, h * 0.56f),
+                end = Offset(w * 0.72f, h * 0.56f),
+                strokeWidth = sw * 0.85f,
+                cap = StrokeCap.Round
+            )
+        } else {
+            drawPath(p, color = color, style = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
     }
 }
 
 @Composable
-fun NavIconClipboard(color: Color, modifier: Modifier = Modifier.size(20.dp)) {
+fun NavIconClipboard(
+    color: Color,
+    filled: Boolean = false,
+    modifier: Modifier = Modifier.size(if (filled) 23.dp else 21.dp)
+) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
         val sw = w * 0.095f
-        drawRoundRect(
-            color = color,
-            topLeft = Offset(w * 0.22f, h * 0.22f),
-            size = Size(w * 0.56f, h * 0.64f),
-            cornerRadius = CornerRadius(w * 0.10f, w * 0.10f),
-            style = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        )
-        drawRoundRect(
-            color = color,
-            topLeft = Offset(w * 0.36f, h * 0.13f),
-            size = Size(w * 0.28f, h * 0.14f),
-            cornerRadius = CornerRadius(w * 0.05f, w * 0.05f),
-            style = Stroke(width = sw)
-        )
-        drawLine(color, Offset(w * 0.35f, h * 0.46f), Offset(w * 0.65f, h * 0.46f), strokeWidth = sw, cap = StrokeCap.Round)
-        drawLine(color, Offset(w * 0.35f, h * 0.63f), Offset(w * 0.58f, h * 0.63f), strokeWidth = sw, cap = StrokeCap.Round)
+        if (filled) {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.21f, h * 0.21f),
+                size = Size(w * 0.58f, h * 0.66f),
+                cornerRadius = CornerRadius(w * 0.12f, w * 0.12f),
+                style = Fill
+            )
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.35f, h * 0.12f),
+                size = Size(w * 0.30f, h * 0.14f),
+                cornerRadius = CornerRadius(w * 0.06f, w * 0.06f),
+                style = Fill
+            )
+            val cutout = Color(0xFF282C2E)
+            drawLine(cutout, Offset(w * 0.34f, h * 0.48f), Offset(w * 0.66f, h * 0.48f), strokeWidth = sw, cap = StrokeCap.Round)
+            drawLine(cutout, Offset(w * 0.34f, h * 0.65f), Offset(w * 0.58f, h * 0.65f), strokeWidth = sw, cap = StrokeCap.Round)
+        } else {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.22f, h * 0.22f),
+                size = Size(w * 0.56f, h * 0.64f),
+                cornerRadius = CornerRadius(w * 0.10f, w * 0.10f),
+                style = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.36f, h * 0.13f),
+                size = Size(w * 0.28f, h * 0.14f),
+                cornerRadius = CornerRadius(w * 0.05f, w * 0.05f),
+                style = Stroke(width = sw)
+            )
+            drawLine(color, Offset(w * 0.35f, h * 0.46f), Offset(w * 0.65f, h * 0.46f), strokeWidth = sw, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.35f, h * 0.63f), Offset(w * 0.58f, h * 0.63f), strokeWidth = sw, cap = StrokeCap.Round)
+        }
     }
 }
 
 @Composable
-fun NavIconRemote(color: Color, modifier: Modifier = Modifier.size(20.dp)) {
+fun NavIconRemote(
+    color: Color,
+    filled: Boolean = false,
+    modifier: Modifier = Modifier.size(if (filled) 23.dp else 21.dp)
+) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
         val sw = w * 0.095f
-        drawRoundRect(
-            color = color,
-            topLeft = Offset(w * 0.15f, h * 0.18f),
-            size = Size(w * 0.70f, h * 0.64f),
-            cornerRadius = CornerRadius(w * 0.12f, w * 0.12f),
-            style = Stroke(width = sw)
-        )
-        drawLine(color, Offset(w * 0.15f, h * 0.62f), Offset(w * 0.85f, h * 0.62f), strokeWidth = sw * 0.85f)
-        drawLine(color, Offset(w * 0.50f, h * 0.62f), Offset(w * 0.50f, h * 0.82f), strokeWidth = sw * 0.85f)
-        drawCircle(color, radius = w * 0.06f, center = Offset(w * 0.50f, h * 0.40f))
+        if (filled) {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.14f, h * 0.17f),
+                size = Size(w * 0.72f, h * 0.66f),
+                cornerRadius = CornerRadius(w * 0.14f, w * 0.14f),
+                style = Fill
+            )
+            val cutout = Color(0xFF282C2E)
+            drawLine(cutout, Offset(w * 0.18f, h * 0.61f), Offset(w * 0.82f, h * 0.61f), strokeWidth = sw * 0.9f)
+            drawLine(cutout, Offset(w * 0.50f, h * 0.61f), Offset(w * 0.50f, h * 0.81f), strokeWidth = sw * 0.9f)
+            drawCircle(cutout, radius = w * 0.075f, center = Offset(w * 0.50f, h * 0.39f))
+        } else {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.15f, h * 0.18f),
+                size = Size(w * 0.70f, h * 0.64f),
+                cornerRadius = CornerRadius(w * 0.12f, w * 0.12f),
+                style = Stroke(width = sw)
+            )
+            drawLine(color, Offset(w * 0.15f, h * 0.62f), Offset(w * 0.85f, h * 0.62f), strokeWidth = sw * 0.85f)
+            drawLine(color, Offset(w * 0.50f, h * 0.62f), Offset(w * 0.50f, h * 0.82f), strokeWidth = sw * 0.85f)
+            drawCircle(color, radius = w * 0.06f, center = Offset(w * 0.50f, h * 0.40f))
+        }
     }
 }
 
 @Composable
-fun NavIconScreen(color: Color, modifier: Modifier = Modifier.size(20.dp)) {
+fun NavIconScreen(
+    color: Color,
+    filled: Boolean = false,
+    modifier: Modifier = Modifier.size(if (filled) 23.dp else 21.dp)
+) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
         val sw = w * 0.095f
-        drawRoundRect(
-            color = color,
-            topLeft = Offset(w * 0.14f, h * 0.20f),
-            size = Size(w * 0.72f, h * 0.48f),
-            cornerRadius = CornerRadius(w * 0.09f, w * 0.09f),
-            style = Stroke(width = sw)
-        )
-        drawLine(color, Offset(w * 0.34f, h * 0.80f), Offset(w * 0.66f, h * 0.80f), strokeWidth = sw, cap = StrokeCap.Round)
-        drawLine(color, Offset(w * 0.50f, h * 0.68f), Offset(w * 0.50f, h * 0.80f), strokeWidth = sw, cap = StrokeCap.Round)
+        if (filled) {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.13f, h * 0.18f),
+                size = Size(w * 0.74f, h * 0.52f),
+                cornerRadius = CornerRadius(w * 0.11f, w * 0.11f),
+                style = Fill
+            )
+            val playTriangle = Path().apply {
+                moveTo(w * 0.43f, h * 0.34f)
+                lineTo(w * 0.61f, h * 0.44f)
+                lineTo(w * 0.43f, h * 0.54f)
+                close()
+            }
+            drawPath(playTriangle, color = Color(0xFF282C2E), style = Fill)
+            drawLine(color, Offset(w * 0.33f, h * 0.81f), Offset(w * 0.67f, h * 0.81f), strokeWidth = sw * 1.15f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.50f, h * 0.68f), Offset(w * 0.50f, h * 0.81f), strokeWidth = sw * 1.15f, cap = StrokeCap.Round)
+        } else {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(w * 0.14f, h * 0.20f),
+                size = Size(w * 0.72f, h * 0.48f),
+                cornerRadius = CornerRadius(w * 0.09f, w * 0.09f),
+                style = Stroke(width = sw)
+            )
+            drawLine(color, Offset(w * 0.34f, h * 0.80f), Offset(w * 0.66f, h * 0.80f), strokeWidth = sw, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.50f, h * 0.68f), Offset(w * 0.50f, h * 0.80f), strokeWidth = sw, cap = StrokeCap.Round)
+        }
     }
 }
 
@@ -284,5 +365,63 @@ fun IconEnterKey(color: Color, modifier: Modifier = Modifier.size(16.dp)) {
         drawPath(p, color = color, style = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round))
         drawLine(color, Offset(w * 0.38f, h * 0.44f), Offset(w * 0.22f, h * 0.60f), strokeWidth = sw, cap = StrokeCap.Round)
         drawLine(color, Offset(w * 0.38f, h * 0.76f), Offset(w * 0.22f, h * 0.60f), strokeWidth = sw, cap = StrokeCap.Round)
+    }
+}
+
+@Composable
+fun IconVolumeOn(color: Color, modifier: Modifier = Modifier.size(15.dp)) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val sw = w * 0.11f
+        val speaker = Path().apply {
+            moveTo(w * 0.14f, h * 0.38f)
+            lineTo(w * 0.32f, h * 0.38f)
+            lineTo(w * 0.52f, h * 0.20f)
+            lineTo(w * 0.52f, h * 0.80f)
+            lineTo(w * 0.32f, h * 0.62f)
+            lineTo(w * 0.14f, h * 0.62f)
+            close()
+        }
+        drawPath(speaker, color = color, style = Fill)
+        drawArc(
+            color = color,
+            startAngle = -52f,
+            sweepAngle = 104f,
+            useCenter = false,
+            topLeft = Offset(w * 0.44f, h * 0.30f),
+            size = Size(w * 0.28f, h * 0.40f),
+            style = Stroke(width = sw, cap = StrokeCap.Round)
+        )
+        drawArc(
+            color = color,
+            startAngle = -56f,
+            sweepAngle = 112f,
+            useCenter = false,
+            topLeft = Offset(w * 0.52f, h * 0.17f),
+            size = Size(w * 0.38f, h * 0.66f),
+            style = Stroke(width = sw, cap = StrokeCap.Round)
+        )
+    }
+}
+
+@Composable
+fun IconVolumeOff(color: Color, modifier: Modifier = Modifier.size(15.dp)) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val sw = w * 0.11f
+        val speaker = Path().apply {
+            moveTo(w * 0.14f, h * 0.38f)
+            lineTo(w * 0.32f, h * 0.38f)
+            lineTo(w * 0.52f, h * 0.20f)
+            lineTo(w * 0.52f, h * 0.80f)
+            lineTo(w * 0.32f, h * 0.62f)
+            lineTo(w * 0.14f, h * 0.62f)
+            close()
+        }
+        drawPath(speaker, color = color, style = Fill)
+        drawLine(color, Offset(w * 0.64f, h * 0.36f), Offset(w * 0.88f, h * 0.64f), strokeWidth = sw, cap = StrokeCap.Round)
+        drawLine(color, Offset(w * 0.88f, h * 0.36f), Offset(w * 0.64f, h * 0.64f), strokeWidth = sw, cap = StrokeCap.Round)
     }
 }
