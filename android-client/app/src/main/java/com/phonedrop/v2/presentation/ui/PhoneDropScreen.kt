@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -160,8 +161,8 @@ fun PhoneDropScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(start = 14.dp, end = 14.dp, top = 10.dp)
                     .liquidGlassBackdropSource(backdropState)
+                    .padding(start = 14.dp, end = 14.dp, top = 10.dp)
             ) {
                 when (selectedTab) {
                     0 -> FilesTab(
@@ -313,16 +314,21 @@ private fun BotanicalTopBar(
             )
         }
 
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f, fill = false).padding(start = 8.dp)
+        ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier
+                    .weight(1f, fill = false)
                     .clip(RoundedCornerShape(999.dp))
                     .background(badgeColor.copy(alpha = 0.14f))
                     .border(1.dp, badgeColor.copy(alpha = 0.35f), RoundedCornerShape(999.dp))
                     .clickable { onOpenSettings() }
-                    .padding(horizontal = 11.dp, vertical = 5.dp)
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 if (state.isConnected) {
                     if (isUsbCable && !isWireless) {
@@ -333,13 +339,23 @@ private fun BotanicalTopBar(
                         IconUsbCable(badgeColor)
                     }
                 }
-                Text(badgeText, color = badgeColor, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = badgeText,
+                    color = badgeColor,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
-            OutlinedButton(
-                onClick = onOpenSettings,
-                border = BorderStroke(1.dp, CardBorder),
-                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
-                modifier = Modifier.height(30.dp)
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(CardSurface)
+                    .border(1.dp, CardBorder, RoundedCornerShape(999.dp))
+                    .clickable { onOpenSettings() }
             ) {
                 IconSettingsSliders(BrassLight)
             }

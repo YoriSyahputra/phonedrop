@@ -22,3 +22,4 @@ android-client/local.properties
 *.part
 *.sock
 .DS_Store
+kls_database.db

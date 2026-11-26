@@ -8,10 +8,8 @@ import android.graphics.Shader
 import android.os.Build
 import android.view.View
 import androidx.annotation.RequiresApi
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -19,12 +17,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
@@ -43,10 +41,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Canvas as ComposeCanvas
-import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -82,8 +78,6 @@ data class GlassNavItem(
 class LiquidGlassBackdropState internal constructor() {
     internal var isRecording: Boolean = false
     internal var hasContent: Boolean = false
-    internal var sourceWidth: Int = 0
-    internal var sourceHeight: Int = 0
     internal var sourcePosInRoot: Offset = Offset.Zero
 
     @Volatile
@@ -111,7 +105,6 @@ fun Modifier.liquidGlassBackdropSource(state: LiquidGlassBackdropState): Modifie
             state.sourcePosInRoot = coords.positionInRoot()
         }
         .drawWithContent {
-            // 1. Always render real screen content first
             this@drawWithContent.drawContent()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
@@ -133,8 +126,6 @@ fun Modifier.liquidGlassBackdropSource(state: LiquidGlassBackdropState): Modifie
                                 drawContext.canvas = prev
                             }
                         }
-                        state.sourceWidth = w
-                        state.sourceHeight = h
                         state.hasContent = true
                         state.recordedSeq++
                         if (state.drawnSeq != state.recordedSeq) {
@@ -147,94 +138,190 @@ fun Modifier.liquidGlassBackdropSource(state: LiquidGlassBackdropState): Modifie
             }
         }
 
-// 5-band chromatic dispersion + convex pebble dome shader (pure float math for driver safety).
-private const val AGSL_LIQUID_PEBBLE = """
+// Outer 64.dp frosted Liquid Glass dock shader (chained after 16.dp Gaussian blur).
+private const val AGSL_DOCK_GLASS = """
 uniform shader content;
-uniform float4 uPebbleRect;
-uniform float uMeniscusPx;
-uniform float uRefractPx;
-uniform float uActivity;
+uniform float4 uBoxRect;
+uniform float uCornerRadius;
+uniform float uRefractHeight;
+uniform float uRefractAmount;
+uniform float uDispersion;
+
+float circleMap(float x) {
+    return 1.0 - sqrt(max(0.0, 1.0 - x * x));
+}
 
 half4 main(float2 fragCoord) {
-    float left = uPebbleRect.x;
-    float top = uPebbleRect.y;
-    float right = uPebbleRect.z;
-    float bottom = uPebbleRect.w;
-
-    float halfH = max((bottom - top) * 0.5, 1.0);
-    float halfW = max((right - left) * 0.5, halfH);
-    float2 center = float2((left + right) * 0.5, (top + bottom) * 0.5);
-    float spineHalf = max(halfW - halfH, 0.0);
+    float2 center = float2((uBoxRect.x + uBoxRect.z) * 0.5, (uBoxRect.y + uBoxRect.w) * 0.5);
+    float2 halfSize = float2(
+        max((uBoxRect.z - uBoxRect.x) * 0.5, 1.0),
+        max((uBoxRect.w - uBoxRect.y) * 0.5, 1.0)
+    );
+    float r = min(uCornerRadius, min(halfSize.x, halfSize.y));
 
     float2 p = fragCoord - center;
-    float2 q = float2(clamp(p.x, -spineHalf, spineHalf), 0.0);
-    float2 diff = p - q;
-    float distFromSpine = length(diff);
-    float signedDist = distFromSpine - halfH;
+    float2 b = halfSize - float2(r);
+    float2 q = abs(p) - b;
+    float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 
-    if (signedDist > 0.0) {
+    if (sd > 0.75) {
         return half4(0.0);
     }
+    float edgeCoverage = clamp(0.5 - sd, 0.0, 1.0);
 
-    float depth = -signedDist;
-    float2 normal = distFromSpine > 0.001 ? (diff / distFromSpine) : float2(0.0, -1.0);
-    float menPx = max(uMeniscusPx, 1.0);
-    float edgeT = clamp(1.0 - depth / menPx, 0.0, 1.0);
-    float lensCurve = pow(edgeT, 2.05);
-
-    float maxShift = uRefractPx * (0.85 + 0.25 * uActivity);
-    float2 baseSample = fragCoord - normal * (lensCurve * maxShift * 0.65);
-
-    float splitPx = (lensCurve * maxShift * 0.52) * (0.55 + 0.45 * abs(normal.y) + 0.30 * uActivity);
-    half4 cR = content.eval(baseSample + normal * splitPx);
-    half4 cY = content.eval(baseSample + normal * (splitPx * 0.48));
-    half4 cG = content.eval(baseSample);
-    half4 cC = content.eval(baseSample - normal * (splitPx * 0.48));
-    half4 cB = content.eval(baseSample - normal * splitPx);
-
-    float rCh = float(cR.r) * 0.72 + float(cY.r) * 0.28;
-    float gCh = float(cY.g) * 0.24 + float(cG.g) * 0.52 + float(cC.g) * 0.24;
-    float bCh = float(cC.b) * 0.30 + float(cB.b) * 0.70;
-    float3 refractedRgb = float3(rCh, gCh, bCh);
-
-    float poleFactor = 0.28 + 0.72 * pow(abs(normal.y), 1.15) + 0.25 * uActivity;
-    float3 prism = float3(0.0);
-    if (edgeT > 0.05) {
-        float3 colRed  = float3(1.00, 0.12, 0.26);
-        float3 colGold = float3(1.00, 0.84, 0.06);
-        float3 colGrn  = float3(0.04, 0.90, 0.46);
-        float3 colCyan = float3(0.02, 0.88, 1.00);
-        float3 colBlue = float3(0.14, 0.38, 1.00);
-
-        float x = clamp((edgeT - 0.10) / 0.88, 0.0, 1.0);
-        if (x < 0.25) {
-            prism = mix(colRed, colGold, x / 0.25);
-        } else if (x < 0.50) {
-            prism = mix(colGold, colGrn, (x - 0.25) / 0.25);
-        } else if (x < 0.75) {
-            prism = mix(colGrn, colCyan, (x - 0.50) / 0.25);
-        } else {
-            prism = mix(colCyan, colBlue, (x - 0.75) / 0.25);
-        }
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    float2 grad;
+    if (q.x > 0.0 && q.y > 0.0) {
+        grad = signP * (q / max(length(q), 0.0001));
+    } else if (q.x > q.y) {
+        grad = float2(signP.x, 0.0);
+    } else {
+        grad = float2(0.0, signP.y);
     }
-    float prismMask = smoothstep(0.10, 0.44, edgeT) * (1.0 - smoothstep(0.86, 0.99, edgeT)) * clamp(poleFactor, 0.0, 1.0);
 
-    float vFrac = clamp((fragCoord.y - top) / max(bottom - top, 1.0), 0.0, 1.0);
-    float3 upperSmoke = float3(0.14, 0.16, 0.17);
-    float3 lowerPewter = float3(0.36, 0.39, 0.41);
-    float3 domeTint = mix(upperSmoke, lowerPewter, smoothstep(0.18, 0.92, vFrac));
+    float depth = max(-sd, 0.0);
+    float rimT = clamp(1.0 - depth / max(uRefractHeight, 1.0), 0.0, 1.0);
+    float lens = circleMap(rimT);
+    float2 baseOffset = grad * (lens * uRefractAmount);
 
-    float interiorFog = mix(0.70, 0.20, smoothstep(0.16, 0.90, edgeT));
-    float3 glassRgb = mix(refractedRgb, domeTint, interiorFog);
-    glassRgb = mix(glassRgb, refractedRgb * 0.42 + prism * 0.94, clamp(prismMask * 0.82, 0.0, 0.86));
+    float3 refracted;
+    if (uDispersion > 0.001 && lens > 0.002) {
+        float2 spread = grad * (pow(rimT, 1.35) * uRefractAmount * uDispersion);
+        float3 s0 = float3(content.eval(fragCoord + baseOffset - spread * 1.00).rgb);
+        float3 s1 = float3(content.eval(fragCoord + baseOffset - spread * 0.66).rgb);
+        float3 s2 = float3(content.eval(fragCoord + baseOffset - spread * 0.33).rgb);
+        float3 s3 = float3(content.eval(fragCoord + baseOffset).rgb);
+        float3 s4 = float3(content.eval(fragCoord + baseOffset + spread * 0.33).rgb);
+        float3 s5 = float3(content.eval(fragCoord + baseOffset + spread * 0.66).rgb);
+        float3 s6 = float3(content.eval(fragCoord + baseOffset + spread * 1.00).rgb);
 
-    float rimLine = smoothstep(0.80, 0.985, edgeT);
-    float sideFresnel = 0.36 + 0.64 * smoothstep(0.12, 0.95, abs(normal.x));
-    float topGlint = smoothstep(0.55, 0.98, 1.0 - abs(vFrac - 0.08)) * (1.0 - smoothstep(0.0, 0.45, edgeT)) * 0.14;
-    glassRgb += float3(0.92, 0.95, 0.98) * (rimLine * sideFresnel * 0.74 + topGlint);
+        float rCh = s0.r * 0.35 + s1.r * 0.35 + s2.r * 0.20 + s3.r * 0.10;
+        float gCh = s1.g * 0.12 + s2.g * 0.26 + s3.g * 0.36 + s4.g * 0.20 + s5.g * 0.06;
+        float bCh = s3.b * 0.10 + s4.b * 0.26 + s5.b * 0.34 + s6.b * 0.30;
+        refracted = float3(rCh, gCh, bCh);
+    } else {
+        refracted = float3(content.eval(fragCoord + baseOffset).rgb);
+    }
 
-    float alpha = clamp(-signedDist * 0.9 + 0.15, 0.0, 1.0);
-    return half4(glassRgb * alpha, alpha);
+    float luma = dot(refracted, float3(0.2126, 0.7152, 0.0722));
+    float3 vibrant = clamp(float3(luma) + (refracted - float3(luma)) * 1.42, 0.0, 1.0);
+
+    float vFrac = clamp((fragCoord.y - uBoxRect.y) / max(uBoxRect.w - uBoxRect.y, 1.0), 0.0, 1.0);
+    float3 dockTint = mix(float3(0.10, 0.11, 0.12), float3(0.07, 0.08, 0.09), vFrac);
+    float3 col = mix(vibrant, dockTint, 0.56);
+
+    // Subtle crisp 0.85dp specular border around dock
+    float hairline = exp(-depth * depth * 0.55) * 0.38;
+    col = clamp(col + float3(0.92, 0.95, 0.98) * hairline, 0.0, 1.0);
+
+    return half4(col * edgeCoverage, edgeCoverage);
+}
+"""
+
+/**
+ * Lifted Crystal-Clear Liquid Glass Droplet shader (active during press / slide / glide):
+ * - Samples the combined scene (live screen [-36dp..+114dp] + frosted dock + actual tab icons & text!).
+ * - Center is crystal-clear with gentle 1.05x magnification so icons & text inside shine sharply.
+ * - Inner bevel bends & stretches tab icons/letters (matching reference photo #2 Home <-> Search).
+ * - Steep outer meniscus refracts dock borders & screen cards with 7-tap energy-conserving RGB
+ *   chromatic aberration (zero fake painted rainbow ring on dark areas!).
+ */
+private const val AGSL_DROPLET_LENS = """
+uniform shader content;
+uniform float4 uBoxRect;
+uniform float uCornerRadius;
+uniform float uRefractHeight;
+uniform float uRefractAmount;
+uniform float uInnerBendPx;
+uniform float uDispersionPx;
+uniform float uLift;
+
+float circleMap(float x) {
+    return 1.0 - sqrt(max(0.0, 1.0 - x * x));
+}
+
+half4 main(float2 fragCoord) {
+    float2 center = float2((uBoxRect.x + uBoxRect.z) * 0.5, (uBoxRect.y + uBoxRect.w) * 0.5);
+    float2 halfSize = float2(
+        max((uBoxRect.z - uBoxRect.x) * 0.5, 1.0),
+        max((uBoxRect.w - uBoxRect.y) * 0.5, 1.0)
+    );
+    float r = min(uCornerRadius, min(halfSize.x, halfSize.y));
+
+    float2 p = fragCoord - center;
+    float2 b = halfSize - float2(r);
+    float2 q = abs(p) - b;
+    float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+
+    if (sd > 0.75 || uLift <= 0.004) {
+        return half4(0.0);
+    }
+    float edgeCoverage = clamp(0.5 - sd, 0.0, 1.0);
+
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    float2 grad;
+    if (q.x > 0.0 && q.y > 0.0) {
+        grad = signP * (q / max(length(q), 0.0001));
+    } else if (q.x > q.y) {
+        grad = float2(signP.x, 0.0);
+    } else {
+        grad = float2(0.0, signP.y);
+    }
+
+    float depth = max(-sd, 0.0);
+    float bevel = max(uRefractHeight, 1.0);
+    float rimT = clamp(1.0 - depth / bevel, 0.0, 1.0);
+    float lens = circleMap(rimT);
+
+    // Gentle interior magnifying glass zoom tapering smoothly into the bevel
+    float2 zoomOffset = -p * (0.055 * uLift * (1.0 - smoothstep(0.0, 0.80, rimT)));
+    // Inner bevel magnifies/stretches letters outward (-grad), outer lip pulls surrounding scene (+grad)
+    float bevelShift = (lens * uRefractAmount) - (sin(rimT * 3.14159265) * uInnerBendPx);
+    float2 baseCoord = fragCoord + zoomOffset + grad * (bevelShift * uLift);
+
+    float3 refracted;
+    if (rimT > 0.02) {
+        float spreadMag = pow(rimT, 1.25) * uDispersionPx * uLift;
+        float2 spread = grad * spreadMag;
+        float3 s0 = float3(content.eval(baseCoord - spread * 1.00).rgb);
+        float3 s1 = float3(content.eval(baseCoord - spread * 0.66).rgb);
+        float3 s2 = float3(content.eval(baseCoord - spread * 0.33).rgb);
+        float3 s3 = float3(content.eval(baseCoord).rgb);
+        float3 s4 = float3(content.eval(baseCoord + spread * 0.33).rgb);
+        float3 s5 = float3(content.eval(baseCoord + spread * 0.66).rgb);
+        float3 s6 = float3(content.eval(baseCoord + spread * 1.00).rgb);
+
+        // Energy-conserving spectral weights (sum = 1.0, 1.0, 1.0: dark stays pure dark!)
+        float rCh = s0.r * 0.36 + s1.r * 0.34 + s2.r * 0.20 + s3.r * 0.10;
+        float gCh = s1.g * 0.12 + s2.g * 0.26 + s3.g * 0.36 + s4.g * 0.20 + s5.g * 0.06;
+        float bCh = s3.b * 0.10 + s4.b * 0.26 + s5.b * 0.34 + s6.b * 0.30;
+        refracted = float3(rCh, gCh, bCh);
+    } else {
+        refracted = float3(content.eval(baseCoord).rgb);
+    }
+
+    // Boost chromatic richness where real bright strokes/edges disperse in the bevel
+    float maxC = max(refracted.r, max(refracted.g, refracted.b));
+    float minC = min(refracted.r, min(refracted.g, refracted.b));
+    float chroma = maxC - minC;
+    float luma = dot(refracted, float3(0.2126, 0.7152, 0.0722));
+    float satGain = 1.25 + 1.55 * smoothstep(0.015, 0.20, chroma) * rimT;
+    float rimBri = 1.0 + 0.55 * smoothstep(0.05, 0.35, maxC) * lens;
+    float3 col = clamp((float3(luma) + (refracted - float3(luma)) * satGain) * rimBri, 0.0, 1.0);
+
+    // Subtle crystal-clear glass surface sheen: fades from resting 0.13 white inner pill (uLift->0)
+    // to transparent water-glass with faint lower pewter reflection when lifted (uLift->1).
+    float vFrac = clamp((fragCoord.y - uBoxRect.y) / max(uBoxRect.w - uBoxRect.y, 1.0), 0.0, 1.0);
+    float restFill = 0.13 * (1.0 - uLift);
+    float liftedSheen = (0.025 + 0.075 * smoothstep(0.35, 1.0, vFrac)) * uLift * (1.0 - 0.65 * lens);
+    col = clamp(col + float3(0.94, 0.96, 0.99) * (restFill + liftedSheen), 0.0, 1.0);
+
+    // Clean ~1.0dp white specular glass rim when lifted (fading out smoothly as it settles back inside dock)
+    float sideWeight = 0.38 + 0.62 * max(abs(grad.x), abs(grad.x * 0.72 - grad.y * 0.68));
+    float rimStroke = exp(-depth * depth * 0.48) * (0.14 + 0.68 * uLift) * sideWeight;
+    col = clamp(col + float3(0.96, 0.98, 1.0) * rimStroke, 0.0, 1.0);
+
+    return half4(col * edgeCoverage, edgeCoverage);
 }
 """
 
@@ -258,48 +345,86 @@ private object RenderNodeApi29 {
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.S)
-private object RenderEffectApi31 {
-    fun applyBlur(nodeObj: Any, radiusPx: Float) {
-        val node = nodeObj as RenderNode
-        val r = radiusPx.coerceAtLeast(1f)
-        node.setRenderEffect(
-            AndroidRenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP)
-        )
-    }
-}
-
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-private object RuntimeShaderApi33 {
-    fun createShaderOrNull(): RuntimeShader? =
-        runCatching { RuntimeShader(AGSL_LIQUID_PEBBLE) }.getOrNull()
+private object LiquidGlassShaderApi33 {
+    fun createDockShaderOrNull(): RuntimeShader? =
+        runCatching { RuntimeShader(AGSL_DOCK_GLASS) }.getOrNull()
 
-    fun applyPebbleEffect(
+    fun createDropletShaderOrNull(): RuntimeShader? =
+        runCatching { RuntimeShader(AGSL_DROPLET_LENS) }.getOrNull()
+
+    fun applyDockEffect(
         nodeObj: Any,
         shaderObj: Any,
+        blurPx: Float,
         left: Float,
         top: Float,
         right: Float,
         bottom: Float,
-        meniscusPx: Float,
-        refractPx: Float,
-        activity: Float
+        cornerRadius: Float,
+        refractHeight: Float,
+        refractAmount: Float,
+        dispersion: Float
     ): Boolean = runCatching {
         val node = nodeObj as RenderNode
         val shader = shaderObj as RuntimeShader
-        shader.setFloatUniform("uPebbleRect", left, top, right, bottom)
-        shader.setFloatUniform("uMeniscusPx", meniscusPx)
-        shader.setFloatUniform("uRefractPx", refractPx)
-        shader.setFloatUniform("uActivity", activity)
-        node.setRenderEffect(AndroidRenderEffect.createRuntimeShaderEffect(shader, "content"))
+        shader.setFloatUniform("uBoxRect", left, top, right, bottom)
+        shader.setFloatUniform("uCornerRadius", cornerRadius)
+        shader.setFloatUniform("uRefractHeight", refractHeight)
+        shader.setFloatUniform("uRefractAmount", refractAmount)
+        shader.setFloatUniform("uDispersion", dispersion)
+
+        val lensFx = AndroidRenderEffect.createRuntimeShaderEffect(shader, "content")
+        val sigma = blurPx.coerceAtLeast(1f)
+        val blurFx = AndroidRenderEffect.createBlurEffect(sigma, sigma, Shader.TileMode.CLAMP)
+        node.setRenderEffect(AndroidRenderEffect.createChainEffect(lensFx, blurFx))
+    }.isSuccess
+
+    fun applyDropletEffect(
+        nodeObj: Any,
+        shaderObj: Any,
+        microBlurPx: Float,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        cornerRadius: Float,
+        refractHeight: Float,
+        refractAmount: Float,
+        innerBendPx: Float,
+        dispersionPx: Float,
+        lift: Float
+    ): Boolean = runCatching {
+        val node = nodeObj as RenderNode
+        val shader = shaderObj as RuntimeShader
+        shader.setFloatUniform("uBoxRect", left, top, right, bottom)
+        shader.setFloatUniform("uCornerRadius", cornerRadius)
+        shader.setFloatUniform("uRefractHeight", refractHeight)
+        shader.setFloatUniform("uRefractAmount", refractAmount)
+        shader.setFloatUniform("uInnerBendPx", innerBendPx)
+        shader.setFloatUniform("uDispersionPx", dispersionPx)
+        shader.setFloatUniform("uLift", lift)
+
+        val lensFx = AndroidRenderEffect.createRuntimeShaderEffect(shader, "content")
+        if (microBlurPx >= 0.8f) {
+            val blurFx = AndroidRenderEffect.createBlurEffect(microBlurPx, microBlurPx, Shader.TileMode.CLAMP)
+            node.setRenderEffect(AndroidRenderEffect.createChainEffect(lensFx, blurFx))
+        } else {
+            node.setRenderEffect(lensFx)
+        }
     }.isSuccess
 }
 
+private fun lerpFloat(start: Float, stop: Float, fraction: Float): Float =
+    start + (stop - start) * fraction
+
 /**
- * Reference-matched iOS 26 protruding smoky-frosted 3D chromatic Liquid Glass pebble navbar:
- * - 64.dp blurred frosted dock centered inside a 78.dp track so the 78.dp pebble bulges 7.dp top & bottom
- * - Live GPU RenderNode backdrop capture + BlurEffect + AGSL 5-band chromatic meniscus refraction
- * - Filled luminous active icons inside the pebble vs crisp outline icons outside (zero text scaling/tilt)
+ * Authentic 2-state Liquid Glass Bottom Navigation Bar matching all 4 reference photos:
+ * 1. Idle (before press): Indicator sits 100% INSIDE the 64.dp navbar (4.dp inset, 56.dp tall)
+ *    as a calm, soft translucent frosted pill with zero protrusion and zero distortion.
+ * 2. Pressed / Dragging / Gliding: Inflates smoothly into a 78.dp crystal-clear refractive
+ *    water-glass droplet floating ABOVE the navbar & tabs, magnifying and chromatically
+ *    dispersing the actual tab icons, tab labels, dock borders, and background content underneath!
  */
 @Composable
 fun LiquidGlassNavBar(
@@ -311,34 +436,39 @@ fun LiquidGlassNavBar(
 ) {
     val count = items.size.coerceAtLeast(1)
     val latestOnSelect by rememberUpdatedState(onSelect)
+    var isPressed by remember { mutableStateOf(false) }
     var isDragging by remember { mutableStateOf(false) }
     var dragIndexFloat by remember { mutableFloatStateOf(selectedIndex.toFloat()) }
 
     val targetPos = if (isDragging) dragIndexFloat else selectedIndex.toFloat()
 
-    // Coupled fluid edge physics: smooth gliding stretch with no forced jittery wobble
+    // Coupled fluid edge springs
     val posA by animateFloatAsState(
         targetValue = targetPos,
         animationSpec = spring(
-            dampingRatio = if (isDragging) 0.94f else 0.85f,
-            stiffness = if (isDragging) 1100f else 410f
+            dampingRatio = if (isDragging) 0.92f else 0.84f,
+            stiffness = if (isDragging) 980f else 390f
         ),
-        label = "LiquidPebbleA"
+        label = "DropletEdgeA"
     )
     val posB by animateFloatAsState(
         targetValue = targetPos,
         animationSpec = spring(
-            dampingRatio = if (isDragging) 0.91f else 0.89f,
-            stiffness = if (isDragging) 680f else 290f
+            dampingRatio = if (isDragging) 0.88f else 0.88f,
+            stiffness = if (isDragging) 640f else 280f
         ),
-        label = "LiquidPebbleB"
+        label = "DropletEdgeB"
     )
 
-    val isActiveSlide = isDragging || abs(posA - posB) > 0.015f || abs(posA - targetPos) > 0.015f
-    val glassActivity by animateFloatAsState(
-        targetValue = if (isActiveSlide) 1f else 0f,
-        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
-        label = "LiquidPebbleActivity"
+    val glideRemain = abs(posA - targetPos)
+    val shouldLift = isPressed || isDragging || glideRemain > 0.03f
+    val liftProgress by animateFloatAsState(
+        targetValue = if (shouldLift) 1f else 0f,
+        animationSpec = spring(
+            dampingRatio = if (shouldLift) 0.74f else 0.84f,
+            stiffness = if (shouldLift) 430f else 360f
+        ),
+        label = "DropletLiftProgress"
     )
 
     val density = LocalDensity.current
@@ -352,36 +482,32 @@ fun LiquidGlassNavBar(
         }
     }
 
-    val dockBlurNode = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) RenderNodeApi29.create("PhoneDropDockBlur") else null
+    val dockRenderNode = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RenderNodeApi29.create("PhoneDropDockGlass") else null
     }
-    val underPebbleNode = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RenderNodeApi29.create("PhoneDropUnderPebble") else null
+    val tabsOnlyNode = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RenderNodeApi29.create("PhoneDropTabsOnly") else null
     }
-    val pebbleShaderNode = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RenderNodeApi29.create("PhoneDropPebbleFX") else null
+    val dropletLensNode = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RenderNodeApi29.create("PhoneDropDropletLens") else null
     }
-    val pebbleShader = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RuntimeShaderApi33.createShaderOrNull() else null
+    val dockShader = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) LiquidGlassShaderApi33.createDockShaderOrNull() else null
     }
-    val dockBorderPaint = remember {
+    val dropletShader = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) LiquidGlassShaderApi33.createDropletShaderOrNull() else null
+    }
+    val dockRimPaint = remember {
         android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
             style = android.graphics.Paint.Style.STROKE
-            color = Color.White.copy(alpha = 0.34f).toArgb()
+            color = Color.White.copy(alpha = 0.42f).toArgb()
         }
     }
-    val dockBgPaint = remember {
-        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            style = android.graphics.Paint.Style.FILL
-            color = Color(0xFF171A1C).copy(alpha = 0.72f).toArgb()
-        }
-    }
-    val dockClipAndroidPath = remember { android.graphics.Path() }
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         BoxWithConstraints(
             modifier = Modifier
@@ -394,7 +520,8 @@ fun LiquidGlassNavBar(
             val totalW = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
             val totalH = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
 
-            val sideMargin = with(density) { 4.dp.toPx() }
+            // Outer 64.dp dock sits at y = [7.dp .. 71.dp], leaving 7.dp room top & bottom for lifted droplet
+            val sideMargin = with(density) { 6.dp.toPx() }
             val dockLeft = sideMargin
             val dockRight = (totalW - sideMargin).coerceAtLeast(dockLeft + 1f)
             val dockW = (dockRight - dockLeft).coerceAtLeast(1f)
@@ -403,180 +530,215 @@ fun LiquidGlassNavBar(
             val dockBottom = dockTop + dockH
             val dockRadius = dockH * 0.5f
 
-            val pebbleTop = 0f
-            val pebbleBottom = totalH
-            val pebbleH = totalH
-            val pebbleRadius = pebbleH * 0.5f
+            // IDLE bounds (liftProgress == 0f): strictly 4.dp INSIDE the 64.dp dock (56.dp tall, concentric)
+            val innerInset = with(density) { 4.dp.toPx() }
+            val innerLeft = dockLeft + innerInset
+            val innerRight = (dockRight - innerInset).coerceAtLeast(innerLeft + 1f)
+            val innerTrackW = (innerRight - innerLeft).coerceAtLeast(1f)
+            val innerSlotW = (innerTrackW / count).coerceAtLeast(1f)
 
-            val slotW = (dockW / count).coerceAtLeast(1f)
-            val pebbleExtraW = with(density) { 10.dp.toPx() }
-            val minPebbleLeft = dockLeft - with(density) { 2.dp.toPx() }
-            val maxPebbleRight = dockRight + with(density) { 2.dp.toPx() }
+            val idlePillLeft = innerLeft + min(posA, posB) * innerSlotW
+            val idlePillRight = innerLeft + max(posA, posB) * innerSlotW + innerSlotW
+            val idlePillTop = dockTop + innerInset
+            val idlePillBottom = dockBottom - innerInset
 
-            val rawLeft = dockLeft + min(posA, posB) * slotW - pebbleExtraW * 0.5f
-            val rawRight = dockLeft + max(posA, posB) * slotW + slotW + pebbleExtraW * 0.5f
-            val pebbleLeft = rawLeft.coerceIn(minPebbleLeft, (maxPebbleRight - pebbleH).coerceAtLeast(minPebbleLeft))
-            val pebbleRight = rawRight.coerceIn((pebbleLeft + pebbleH).coerceAtMost(maxPebbleRight), maxPebbleRight)
+            // LIFTED bounds (liftProgress == 1f): inflates to 78.dp tall (7.dp proud top & bottom)
+            // and +10.dp wider per side (overhanging up to 6.dp at dock ends like Reference Photo #3)
+            val expandSidePx = with(density) { 10.dp.toPx() }
+            val liftedLeft = (idlePillLeft - expandSidePx).coerceAtLeast(0.5f)
+            val liftedRight = (idlePillRight + expandSidePx).coerceAtMost(totalW - 0.5f)
+
+            val curLeft = lerpFloat(idlePillLeft, liftedLeft, liftProgress)
+            val curRight = lerpFloat(idlePillRight, liftedRight, liftProgress)
+            val curTop = lerpFloat(idlePillTop, 0f, liftProgress)
+            val curBottom = lerpFloat(idlePillBottom, totalH, liftProgress)
+            val curH = (curBottom - curTop).coerceAtLeast(1f)
+            val curRadius = curH * 0.5f
 
             val dockRect = Rect(dockLeft, dockTop, dockRight, dockBottom)
             val dockPath = Path().apply {
                 addRoundRect(RoundRect(dockRect, CornerRadius(dockRadius, dockRadius)))
             }
-            val pebbleRect = Rect(pebbleLeft, pebbleTop, pebbleRight, pebbleBottom)
-            val pebblePath = Path().apply {
-                addRoundRect(RoundRect(pebbleRect, CornerRadius(pebbleRadius, pebbleRadius)))
+            val pillRect = Rect(curLeft, curTop, curRight, curBottom)
+            val pillPath = Path().apply {
+                addRoundRect(RoundRect(pillRect, CornerRadius(curRadius, curRadius)))
             }
 
-            // 1. Frosted Live-Blurred Outer Dock (64.dp centered at y = 7..71.dp)
-            val blurSigmaPx = with(density) { 20.dp.toPx() }
+            val bleedPx = with(density) { 36.dp.toPx() }
+            val dockBlurPx = with(density) { 16.dp.toPx() }
+            val dockRefractH = with(density) { 10.dp.toPx() }
+            val dockRefractAmt = with(density) { 16.dp.toPx() }
+
+            // Pass 1: Outer Frosted Dock + Resting Inner Frosted Pill (visible at idle, fades out as droplet lifts)
             Canvas(modifier = Modifier.fillMaxSize()) {
-                // Read backdropTick so scroll redraws trigger dock blur updates without looping
                 @Suppress("UNUSED_EXPRESSION")
                 backdropTick
-
                 if (backdropState != null) {
                     backdropState.drawnSeq = backdropState.recordedSeq
                 }
 
-                drawFrostedBlurredDock(
+                drawOuterDockAndRestingPill(
                     dockRect = dockRect,
                     dockPath = dockPath,
                     dockRadius = dockRadius,
+                    pillRect = pillRect,
+                    pillRadius = curRadius,
+                    liftProgress = liftProgress,
                     totalW = size.width,
                     totalH = size.height,
-                    blurSigmaPx = blurSigmaPx,
+                    bleedPx = bleedPx,
+                    dockBlurPx = dockBlurPx,
+                    dockRefractH = dockRefractH,
+                    dockRefractAmt = dockRefractAmt,
                     backdropState = backdropState,
                     navPosInRoot = navPosInRoot,
-                    dockBlurNode = dockBlurNode
+                    dockRenderNode = dockRenderNode,
+                    dockShader = dockShader
                 )
             }
 
-            // 2. Stationary Inactive Tabs outside the protruding pebble only (Zero scaling/wobble)
+            // Pass 2: Unified Tab Row (also recorded into leaf `tabsOnlyNode` when droplet is lifted so
+            // the floating glass droplet refracts & chromatically splits the actual tab icons & labels!)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 4.dp, vertical = 7.dp)
                     .drawWithContent {
-                        clipPath(pebblePath, ClipOp.Difference) {
+                        // When droplet is lifted on API 33+, hide raw un-refracted tab pixels strictly
+                        // inside pillPath because Pass 3 draws the refracted tabs through the clear lens!
+                        val useShaderDroplet = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            drawContext.canvas.nativeCanvas.isHardwareAccelerated &&
+                            liftProgress > 0.01f &&
+                            tabsOnlyNode != null &&
+                            dropletLensNode != null &&
+                            dropletShader != null
+
+                        if (useShaderDroplet && tabsOnlyNode != null) {
+                            val wInt = size.width.roundToInt().coerceAtLeast(1)
+                            val hInt = size.height.roundToInt().coerceAtLeast(1)
+                            RenderNodeApi29.record(tabsOnlyNode, wInt, hInt) { rec ->
+                                val prev = drawContext.canvas
+                                drawContext.canvas = ComposeCanvas(rec)
+                                try {
+                                    this@drawWithContent.drawContent()
+                                } finally {
+                                    drawContext.canvas = prev
+                                }
+                            }
+                            clipPath(pillPath, androidx.compose.ui.graphics.ClipOp.Difference) {
+                                this@drawWithContent.drawContent()
+                            }
+                        } else {
                             this@drawWithContent.drawContent()
                         }
                     }
+                    .padding(horizontal = 10.dp, vertical = 7.dp)
             ) {
                 items.forEachIndexed { idx, item ->
-                    PebbleTabItem(
+                    val isSelected = idx == selectedIndex
+                    TabSlotContent(
                         item = item,
-                        tint = Color(0xFF9EA3A6),
-                        fontWeight = FontWeight.Medium,
-                        filled = false,
-                        isSelected = idx == selectedIndex,
+                        tint = if (isSelected) Color(0xFFF6F7F9) else Color(0xFF9EA3A6),
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                        filled = isSelected,
+                        isSelected = isSelected,
                         modifier = Modifier.weight(1f)
                     )
                 }
             }
 
-            // 3. Protruding 3D Chromatic-Refraction Liquid Glass Pebble (78.dp bulging 7.dp top & bottom)
-            val meniscusPx = with(density) { 9.5.dp.toPx() }
-            val refractPx = with(density) { 22.dp.toPx() }
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                @Suppress("UNUSED_EXPRESSION")
-                backdropTick
+            // Pass 3: Lifted Crystal-Clear Refractive Liquid Glass Droplet (only when pressed / sliding!)
+            if (liftProgress > 0.01f) {
+                val dropletMicroBlurPx = with(density) { 0.9.dp.toPx() }
+                val dropletRefractH = with(density) { 15.dp.toPx() }
+                val dropletRefractAmt = with(density) { 30.dp.toPx() }
+                val dropletInnerBendPx = with(density) { 9.5.dp.toPx() }
+                val dropletDispersionPx = with(density) { 15.dp.toPx() }
 
-                drawChromaticLiquidPebble(
-                    pebbleRect = pebbleRect,
-                    pebblePath = pebblePath,
-                    pebbleRadius = pebbleRadius,
-                    dockRect = dockRect,
-                    dockRadius = dockRadius,
-                    totalW = size.width,
-                    totalH = size.height,
-                    meniscusPx = meniscusPx,
-                    refractPx = refractPx,
-                    activity = glassActivity,
-                    backdropState = backdropState,
-                    navPosInRoot = navPosInRoot,
-                    dockBlurNode = dockBlurNode,
-                    underPebbleNode = underPebbleNode,
-                    pebbleShaderNode = pebbleShaderNode,
-                    pebbleShader = pebbleShader,
-                    dockBorderPaint = dockBorderPaint,
-                    dockBgPaint = dockBgPaint,
-                    clipAndroidPath = dockClipAndroidPath
-                )
-            }
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    @Suppress("UNUSED_EXPRESSION")
+                    backdropTick
 
-            // 4. Active Crisp Filled Icon & Label clipped strictly inside the protruding pebble
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .drawWithContent {
-                        clipPath(pebblePath, ClipOp.Intersect) {
-                            this@drawWithContent.drawContent()
-                        }
-                    }
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 4.dp, vertical = 7.dp)
-                ) {
-                    items.forEachIndexed { idx, item ->
-                        PebbleTabItem(
-                            item = item,
-                            tint = Color(0xFFF5F6F8),
-                            fontWeight = FontWeight.SemiBold,
-                            filled = true,
-                            isSelected = idx == selectedIndex,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+                    drawLiftedLiquidDroplet(
+                        pillRect = pillRect,
+                        pillRadius = curRadius,
+                        dockRect = dockRect,
+                        dockRadius = dockRadius,
+                        liftProgress = liftProgress,
+                        totalW = size.width,
+                        totalH = size.height,
+                        bleedPx = bleedPx,
+                        microBlurPx = dropletMicroBlurPx,
+                        refractHeight = dropletRefractH,
+                        refractAmount = dropletRefractAmt,
+                        innerBendPx = dropletInnerBendPx,
+                        dispersionPx = dropletDispersionPx,
+                        backdropState = backdropState,
+                        navPosInRoot = navPosInRoot,
+                        dockRenderNode = dockRenderNode,
+                        tabsOnlyNode = tabsOnlyNode,
+                        dropletLensNode = dropletLensNode,
+                        dropletShader = dropletShader,
+                        dockRimPaint = dockRimPaint
+                    )
                 }
             }
 
-            // 5. Unified Tap + Smooth Horizontal Drag Gesture Overlay
+            // Pass 4: Gesture Layer (Press to inflate in place, Drag to slide droplet across tabs, Tap to jump)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(count, dockLeft, slotW) {
-                        val touchSlop = viewConfiguration.touchSlop
+                    .pointerInput(count, innerLeft, innerSlotW) {
+                        val dragThreshold = viewConfiguration.touchSlop * 0.45f
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val startX = down.position.x
-                            var draggingThisGesture = false
+                            val downSlot = ((startX - innerLeft) / innerSlotW).toInt().coerceIn(0, count - 1)
+                            // Immediately inflate the pill on press; if user presses directly on another slot,
+                            // begin gliding the droplet toward their finger right away!
+                            isPressed = true
+                            if (downSlot != selectedIndex) {
+                                isDragging = true
+                                dragIndexFloat = ((startX - innerLeft) / innerSlotW - 0.5f)
+                                    .coerceIn(0f, (count - 1).toFloat())
+                            }
+                            var draggingThisGesture = downSlot != selectedIndex
                             var lastX = startX
 
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (!change.pressed) {
-                                    if (draggingThisGesture) {
-                                        val snapped = dragIndexFloat.roundToInt().coerceIn(0, count - 1)
-                                        isDragging = false
-                                        latestOnSelect(snapped)
-                                    } else {
-                                        val relX = (lastX - dockLeft).coerceAtLeast(0f)
-                                        val tapped = (relX / slotW).toInt().coerceIn(0, count - 1)
-                                        latestOnSelect(tapped)
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (!change.pressed) {
+                                        if (draggingThisGesture) {
+                                            val snapped = dragIndexFloat.roundToInt().coerceIn(0, count - 1)
+                                            isDragging = false
+                                            latestOnSelect(snapped)
+                                        } else {
+                                            val tapped = ((lastX - innerLeft) / innerSlotW).toInt().coerceIn(0, count - 1)
+                                            latestOnSelect(tapped)
+                                        }
+                                        break
                                     }
-                                    break
-                                }
 
-                                lastX = change.position.x
-                                val totalDx = lastX - startX
-                                if (!draggingThisGesture && abs(totalDx) > touchSlop) {
-                                    draggingThisGesture = true
-                                    isDragging = true
-                                    dragIndexFloat = ((lastX - dockLeft) / slotW - 0.5f)
-                                        .coerceIn(0f, (count - 1).toFloat())
+                                    lastX = change.position.x
+                                    val totalDx = lastX - startX
+                                    if (!draggingThisGesture && abs(totalDx) > dragThreshold) {
+                                        draggingThisGesture = true
+                                        isDragging = true
+                                        dragIndexFloat = ((lastX - innerLeft) / innerSlotW - 0.5f)
+                                            .coerceIn(0f, (count - 1).toFloat())
+                                    }
+                                    if (draggingThisGesture && change.positionChanged()) {
+                                        change.consume()
+                                        dragIndexFloat = ((lastX - innerLeft) / innerSlotW - 0.5f)
+                                            .coerceIn(0f, (count - 1).toFloat())
+                                    }
                                 }
-                                if (draggingThisGesture && change.positionChanged()) {
-                                    change.consume()
-                                    dragIndexFloat = ((lastX - dockLeft) / slotW - 0.5f)
-                                        .coerceIn(0f, (count - 1).toFloat())
-                                }
+                            } finally {
+                                isPressed = false
+                                isDragging = false
                             }
-                            isDragging = false
                         }
                     }
             )
@@ -585,7 +747,7 @@ fun LiquidGlassNavBar(
 }
 
 @Composable
-private fun PebbleTabItem(
+private fun TabSlotContent(
     item: GlassNavItem,
     tint: Color,
     fontWeight: FontWeight,
@@ -608,66 +770,95 @@ private fun PebbleTabItem(
         Text(
             text = item.label,
             color = tint,
-            fontSize = 11.5.sp,
+            fontSize = 11.sp,
             fontWeight = fontWeight,
             maxLines = 1
         )
     }
 }
 
-private fun DrawScope.drawFrostedBlurredDock(
+private fun DrawScope.drawOuterDockAndRestingPill(
     dockRect: Rect,
     dockPath: Path,
     dockRadius: Float,
+    pillRect: Rect,
+    pillRadius: Float,
+    liftProgress: Float,
     totalW: Float,
     totalH: Float,
-    blurSigmaPx: Float,
+    bleedPx: Float,
+    dockBlurPx: Float,
+    dockRefractH: Float,
+    dockRefractAmt: Float,
     backdropState: LiquidGlassBackdropState?,
     navPosInRoot: Offset,
-    dockBlurNode: Any?
+    dockRenderNode: Any?,
+    dockShader: Any?
 ) {
-    val wInt = totalW.roundToInt().coerceAtLeast(1)
-    val hInt = totalH.roundToInt().coerceAtLeast(1)
     val nativeCanvas = drawContext.canvas.nativeCanvas
 
-    // Subtle soft ambient drop shadow under the 64.dp floating dock
+    // Ambient shadow under the 64.dp dock
     drawRoundRect(
-        color = Color.Black.copy(alpha = 0.42f),
-        topLeft = Offset(dockRect.left + 1.dp.toPx(), dockRect.top + 3.dp.toPx()),
-        size = Size(dockRect.width - 2.dp.toPx(), dockRect.height),
+        color = Color.Black.copy(alpha = 0.40f),
+        topLeft = Offset(dockRect.left + 1.dp.toPx(), dockRect.top + 2.dp.toPx()),
+        size = Size((dockRect.width - 2.dp.toPx()).coerceAtLeast(1f), dockRect.height),
         cornerRadius = CornerRadius(dockRadius, dockRadius)
     )
 
-    clipPath(dockPath) {
-        var drewLiveBlur = false
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            nativeCanvas.isHardwareAccelerated &&
-            backdropState != null &&
-            backdropState.hasContent &&
-            backdropState.backdropNode != null &&
-            dockBlurNode != null
-        ) {
-            drewLiveBlur = runCatching {
-                val relX = navPosInRoot.x - backdropState.sourcePosInRoot.x
-                val relY = navPosInRoot.y - backdropState.sourcePosInRoot.y
-                RenderNodeApi29.record(dockBlurNode, wInt, hInt) { rc ->
-                    rc.drawColor(Color(0xFF0B110E).toArgb())
+    var drewShaderDock = false
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        nativeCanvas.isHardwareAccelerated &&
+        dockRenderNode != null &&
+        dockShader != null
+    ) {
+        val wInt = totalW.roundToInt().coerceAtLeast(1)
+        val bleedInt = bleedPx.roundToInt().coerceAtLeast(0)
+        val hBleedInt = (totalH.roundToInt() + bleedInt * 2).coerceAtLeast(1)
+        val bleedF = bleedInt.toFloat()
+
+        drewShaderDock = runCatching {
+            RenderNodeApi29.record(dockRenderNode, wInt, hBleedInt) { rc ->
+                rc.drawColor(Color(0xFF0B110E).toArgb())
+                if (backdropState != null && backdropState.hasContent && backdropState.backdropNode != null) {
+                    val relX = navPosInRoot.x - backdropState.sourcePosInRoot.x
+                    val relY = navPosInRoot.y - backdropState.sourcePosInRoot.y
                     rc.save()
-                    rc.translate(-relX, -relY)
+                    rc.translate(-relX, -relY + bleedF)
                     RenderNodeApi29.drawNode(rc, backdropState.backdropNode)
                     rc.restore()
                 }
-                RenderEffectApi31.applyBlur(dockBlurNode, blurSigmaPx)
-                RenderNodeApi29.drawNode(nativeCanvas, dockBlurNode)
+            }
+            val ok = LiquidGlassShaderApi33.applyDockEffect(
+                nodeObj = dockRenderNode,
+                shaderObj = dockShader,
+                blurPx = dockBlurPx,
+                left = dockRect.left,
+                top = dockRect.top + bleedF,
+                right = dockRect.right,
+                bottom = dockRect.bottom + bleedF,
+                cornerRadius = dockRadius,
+                refractHeight = dockRefractH,
+                refractAmount = dockRefractAmt,
+                dispersion = 0.45f
+            )
+            if (ok) {
+                nativeCanvas.save()
+                nativeCanvas.translate(0f, -bleedF)
+                RenderNodeApi29.drawNode(nativeCanvas, dockRenderNode)
+                nativeCanvas.restore()
                 true
-            }.getOrDefault(false)
-        }
+            } else {
+                false
+            }
+        }.getOrDefault(false)
+    }
 
-        if (!drewLiveBlur) {
+    if (!drewShaderDock) {
+        clipPath(dockPath) {
             drawRect(
                 brush = Brush.verticalGradient(
-                    0f to Color(0xFF1F2325),
-                    1f to Color(0xFF131618),
+                    0f to Color(0xFF1A1D1F).copy(alpha = 0.86f),
+                    1f to Color(0xFF111315).copy(alpha = 0.90f),
                     startY = dockRect.top,
                     endY = dockRect.bottom
                 ),
@@ -675,205 +866,159 @@ private fun DrawScope.drawFrostedBlurredDock(
                 size = Size(dockRect.width, dockRect.height)
             )
         }
-
-        // Dark smoky frosted overlay matching Photos 1 & 2
-        drawRect(
-            brush = Brush.verticalGradient(
-                0f to Color(0xFF181B1D).copy(alpha = 0.62f),
-                0.5f to Color(0xFF111415).copy(alpha = 0.72f),
-                1f to Color(0xFF1A1E20).copy(alpha = 0.66f),
-                startY = dockRect.top,
-                endY = dockRect.bottom
-            ),
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.24f),
             topLeft = Offset(dockRect.left, dockRect.top),
-            size = Size(dockRect.width, dockRect.height)
+            size = Size(dockRect.width, dockRect.height),
+            cornerRadius = CornerRadius(dockRadius, dockRadius),
+            style = Stroke(width = 0.85.dp.toPx())
         )
     }
 
-    // Crisp outer silver-white hairline dock border
-    drawRoundRect(
-        brush = Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.28f),
-                Color.White.copy(alpha = 0.14f),
-                Color.White.copy(alpha = 0.22f)
+    // IDLE STATE (Reference Photo #1): Soft frosted inner capsule strictly 4.dp INSIDE the dock!
+    // Fades out smoothly as `liftProgress` rises into the 3D transparent droplet.
+    val idleAlpha = (1f - liftProgress).coerceIn(0f, 1f)
+    if (idleAlpha > 0.005f) {
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                0f to Color.White.copy(alpha = 0.11f * idleAlpha),
+                0.55f to Color.White.copy(alpha = 0.14f * idleAlpha),
+                1f to Color.White.copy(alpha = 0.17f * idleAlpha),
+                startY = pillRect.top,
+                endY = pillRect.bottom
             ),
-            startY = dockRect.top,
-            endY = dockRect.bottom
-        ),
-        topLeft = Offset(dockRect.left, dockRect.top),
-        size = Size(dockRect.width, dockRect.height),
-        cornerRadius = CornerRadius(dockRadius, dockRadius),
-        style = Stroke(width = 1.dp.toPx())
-    )
+            topLeft = Offset(pillRect.left, pillRect.top),
+            size = Size(pillRect.width, pillRect.height),
+            cornerRadius = CornerRadius(pillRadius, pillRadius)
+        )
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.10f * idleAlpha),
+            topLeft = Offset(pillRect.left, pillRect.top),
+            size = Size(pillRect.width, pillRect.height),
+            cornerRadius = CornerRadius(pillRadius, pillRadius),
+            style = Stroke(width = 0.7.dp.toPx())
+        )
+    }
 }
 
-private fun DrawScope.drawChromaticLiquidPebble(
-    pebbleRect: Rect,
-    pebblePath: Path,
-    pebbleRadius: Float,
+private fun DrawScope.drawLiftedLiquidDroplet(
+    pillRect: Rect,
+    pillRadius: Float,
     dockRect: Rect,
     dockRadius: Float,
+    liftProgress: Float,
     totalW: Float,
     totalH: Float,
-    meniscusPx: Float,
-    refractPx: Float,
-    activity: Float,
+    bleedPx: Float,
+    microBlurPx: Float,
+    refractHeight: Float,
+    refractAmount: Float,
+    innerBendPx: Float,
+    dispersionPx: Float,
     backdropState: LiquidGlassBackdropState?,
     navPosInRoot: Offset,
-    dockBlurNode: Any?,
-    underPebbleNode: Any?,
-    pebbleShaderNode: Any?,
-    pebbleShader: Any?,
-    dockBorderPaint: android.graphics.Paint,
-    dockBgPaint: android.graphics.Paint,
-    clipAndroidPath: android.graphics.Path
+    dockRenderNode: Any?,
+    tabsOnlyNode: Any?,
+    dropletLensNode: Any?,
+    dropletShader: Any?,
+    dockRimPaint: android.graphics.Paint
 ) {
-    val wInt = totalW.roundToInt().coerceAtLeast(1)
-    val hInt = totalH.roundToInt().coerceAtLeast(1)
     val nativeCanvas = drawContext.canvas.nativeCanvas
 
-    // Soft elevation shadow behind the protruding pebble
+    // Soft floating droplet shadow when lifted
     drawRoundRect(
-        color = Color.Black.copy(alpha = 0.44f),
-        topLeft = Offset(pebbleRect.left + 1.dp.toPx(), pebbleRect.top + 2.dp.toPx()),
-        size = Size(pebbleRect.width - 2.dp.toPx(), pebbleRect.height - 1.dp.toPx()),
-        cornerRadius = CornerRadius(pebbleRadius, pebbleRadius)
+        color = Color.Black.copy(alpha = 0.34f * liftProgress),
+        topLeft = Offset(pillRect.left + 1.dp.toPx(), pillRect.top + 2.dp.toPx()),
+        size = Size((pillRect.width - 2.dp.toPx()).coerceAtLeast(1f), pillRect.height),
+        cornerRadius = CornerRadius(pillRadius, pillRadius)
     )
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
         nativeCanvas.isHardwareAccelerated &&
-        underPebbleNode != null &&
-        pebbleShaderNode != null &&
-        pebbleShader != null
+        dropletLensNode != null &&
+        dropletShader != null
     ) {
-        val drewShader = runCatching {
-            dockBorderPaint.strokeWidth = 1.2.dp.toPx()
-            clipAndroidPath.reset()
-            clipAndroidPath.addRoundRect(
-                dockRect.left,
-                dockRect.top,
-                dockRect.right,
-                dockRect.bottom,
-                dockRadius,
-                dockRadius,
-                android.graphics.Path.Direction.CW
-            )
+        val wInt = totalW.roundToInt().coerceAtLeast(1)
+        val bleedInt = bleedPx.roundToInt().coerceAtLeast(0)
+        val hBleedInt = (totalH.roundToInt() + bleedInt * 2).coerceAtLeast(1)
+        val bleedF = bleedInt.toFloat()
 
-            // Composite live protruding top/bottom screen backdrop + blurred dock borders under the pebble lens
-            RenderNodeApi29.record(underPebbleNode, wInt, hInt) { rc ->
+        val ok = runCatching {
+            dockRimPaint.strokeWidth = 1.1.dp.toPx()
+            RenderNodeApi29.record(dropletLensNode, wInt, hBleedInt) { rc ->
                 rc.drawColor(Color(0xFF0B110E).toArgb())
                 if (backdropState != null && backdropState.hasContent && backdropState.backdropNode != null) {
                     val relX = navPosInRoot.x - backdropState.sourcePosInRoot.x
                     val relY = navPosInRoot.y - backdropState.sourcePosInRoot.y
                     rc.save()
-                    rc.translate(-relX, -relY)
+                    rc.translate(-relX, -relY + bleedF)
                     RenderNodeApi29.drawNode(rc, backdropState.backdropNode)
                     rc.restore()
                 }
-                // Overlay blurred dock + crisp y=7dp/71dp borders inside dock bounds so meniscus refracts them
-                rc.save()
-                rc.clipPath(clipAndroidPath)
-                if (dockBlurNode != null && backdropState != null && backdropState.hasContent) {
-                    RenderNodeApi29.drawNode(rc, dockBlurNode)
+                if (dockRenderNode != null) {
+                    RenderNodeApi29.drawNode(rc, dockRenderNode)
                 }
+                // Crisp dock specular border so top & bottom protruding rims disperse it cleanly
                 rc.drawRoundRect(
-                    dockRect.left, dockRect.top, dockRect.right, dockRect.bottom,
-                    dockRadius, dockRadius, dockBgPaint
+                    dockRect.left,
+                    dockRect.top + bleedF,
+                    dockRect.right,
+                    dockRect.bottom + bleedF,
+                    dockRadius,
+                    dockRadius,
+                    dockRimPaint
                 )
-                rc.restore()
-                rc.drawRoundRect(
-                    dockRect.left, dockRect.top, dockRect.right, dockRect.bottom,
-                    dockRadius, dockRadius, dockBorderPaint
-                )
+                // Draw the actual Tab Icons & Labels into the scene so the droplet refracts &
+                // chromatically splits them as it slides over tabs (Reference Photos #2, #3, #4)!
+                if (tabsOnlyNode != null) {
+                    rc.save()
+                    rc.translate(0f, bleedF)
+                    RenderNodeApi29.drawNode(rc, tabsOnlyNode)
+                    rc.restore()
+                }
             }
 
-            RenderNodeApi29.record(pebbleShaderNode, wInt, hInt) { rc ->
-                RenderNodeApi29.drawNode(rc, underPebbleNode)
-            }
-            val applied = RuntimeShaderApi33.applyPebbleEffect(
-                nodeObj = pebbleShaderNode,
-                shaderObj = pebbleShader,
-                left = pebbleRect.left,
-                top = pebbleRect.top,
-                right = pebbleRect.right,
-                bottom = pebbleRect.bottom,
-                meniscusPx = meniscusPx,
-                refractPx = refractPx,
-                activity = activity
+            val applied = LiquidGlassShaderApi33.applyDropletEffect(
+                nodeObj = dropletLensNode,
+                shaderObj = dropletShader,
+                microBlurPx = microBlurPx,
+                left = pillRect.left,
+                top = pillRect.top + bleedF,
+                right = pillRect.right,
+                bottom = pillRect.bottom + bleedF,
+                cornerRadius = pillRadius,
+                refractHeight = refractHeight,
+                refractAmount = refractAmount,
+                innerBendPx = innerBendPx,
+                dispersionPx = dispersionPx,
+                lift = liftProgress
             )
             if (applied) {
-                RenderNodeApi29.drawNode(nativeCanvas, pebbleShaderNode)
+                nativeCanvas.save()
+                nativeCanvas.translate(0f, -bleedF)
+                RenderNodeApi29.drawNode(nativeCanvas, dropletLensNode)
+                nativeCanvas.restore()
                 true
             } else {
                 false
             }
         }.getOrDefault(false)
 
-        if (drewShader) return
+        if (ok) return
     }
 
-    // High-precision Canvas fallback for API 26-32 or software canvas
-    drawFallbackChromaticPebble(pebbleRect, pebblePath, pebbleRadius, activity)
-}
-
-private fun DrawScope.drawFallbackChromaticPebble(
-    pebbleRect: Rect,
-    pebblePath: Path,
-    radius: Float,
-    activity: Float
-) {
-    val cr = CornerRadius(radius, radius)
-    val tl = Offset(pebbleRect.left, pebbleRect.top)
-    val sz = Size(pebbleRect.width, pebbleRect.height)
-
-    clipPath(pebblePath) {
-        drawRect(
-            brush = Brush.verticalGradient(
-                0f to Color(0xFF232729).copy(alpha = 0.80f),
-                0.55f to Color(0xFF3E4346).copy(alpha = 0.72f),
-                1f to Color(0xFF646B70).copy(alpha = 0.70f),
-                startY = pebbleRect.top,
-                endY = pebbleRect.bottom
-            ),
-            topLeft = tl,
-            size = sz
-        )
-
-        val bandColors = listOf(
-            Color(0xFFFF2448),
-            Color(0xFFFFD600),
-            Color(0xFF00E676),
-            Color(0xFF00E5FF),
-            Color(0xFF1A5EFF)
-        )
-        bandColors.forEachIndexed { idx, col ->
-            val inset = (8.dp.toPx() - idx * 1.5.dp.toPx()).coerceAtLeast(0.5.dp.toPx())
-            drawRoundRect(
-                color = col.copy(alpha = 0.34f + 0.14f * activity),
-                topLeft = Offset(pebbleRect.left + inset, pebbleRect.top + inset),
-                size = Size((pebbleRect.width - 2f * inset).coerceAtLeast(1f), (pebbleRect.height - 2f * inset).coerceAtLeast(1f)),
-                cornerRadius = CornerRadius((radius - inset).coerceAtLeast(1f), (radius - inset).coerceAtLeast(1f)),
-                style = Stroke(width = 2.0.dp.toPx()),
-                blendMode = BlendMode.Plus
-            )
-        }
-    }
-
+    // Fallback lifted outline for API 26-32
     drawRoundRect(
-        brush = Brush.horizontalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.82f),
-                Color.White.copy(alpha = 0.25f),
-                Color.White.copy(alpha = 0.25f),
-                Color.White.copy(alpha = 0.78f)
-            ),
-            startX = pebbleRect.left,
-            endX = pebbleRect.right
-        ),
-        topLeft = tl,
-        size = sz,
-        cornerRadius = cr,
-        style = Stroke(width = 1.1.dp.toPx(), cap = StrokeCap.Round)
+        color = Color.White.copy(alpha = 0.14f),
+        topLeft = Offset(pillRect.left, pillRect.top),
+        size = Size(pillRect.width, pillRect.height),
+        cornerRadius = CornerRadius(pillRadius, pillRadius)
+    )
+    drawRoundRect(
+        color = Color.White.copy(alpha = 0.65f * liftProgress),
+        topLeft = Offset(pillRect.left, pillRect.top),
+        size = Size(pillRect.width, pillRect.height),
+        cornerRadius = CornerRadius(pillRadius, pillRadius),
+        style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round)
     )
 }
